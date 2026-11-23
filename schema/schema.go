@@ -122,12 +122,23 @@ type CreateIndex struct {
 	Unique      bool
 	IfNotExists bool
 	Where       string // partial index predicate (Postgres, SQLite, MSSQL)
+	// Concurrently builds the index without blocking writes (Postgres).
+	// The migration then runs outside a transaction, so keep the index
+	// alone in its migration.
+	Concurrently bool
 }
 
 type DropIndex struct {
 	Table    string
 	Name     string
 	IfExists bool
+}
+
+// AllowUnsafe marks checks that were reviewed for this migration, so
+// `kiln lint` does not report them. It generates no SQL.
+type AllowUnsafe struct {
+	Reason string
+	Checks []string // empty means every check
 }
 
 // Exec runs raw SQL.
@@ -161,6 +172,7 @@ func (CreateIndex) isOp()    {}
 func (DropIndex) isOp()      {}
 func (Exec) isOp()           {}
 func (Do) isOp()             {}
+func (AllowUnsafe) isOp()    {}
 
 // Schema accumulates operations in order.
 type Schema struct {
@@ -235,6 +247,15 @@ func (s *Schema) CreateUniqueIndex(table, name string, columns []string, opts ..
 }
 
 func (s *Schema) DropIndex(table, name string) { s.add(DropIndex{Table: table, Name: name}) }
+
+// AllowUnsafe silences the named lint checks (all of them if none are
+// given) for this migration, after you have reviewed them. The reason is
+// required and is kept in the code as a record of the decision:
+//
+//	s.AllowUnsafe("legacy_score unused since v2.3", "drop-column")
+func (s *Schema) AllowUnsafe(reason string, checks ...string) {
+	s.add(AllowUnsafe{Reason: reason, Checks: checks})
+}
 func (s *Schema) DropIndexIfExists(table, name string) {
 	s.add(DropIndex{Table: table, Name: name, IfExists: true})
 }

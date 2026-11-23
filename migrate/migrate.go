@@ -314,26 +314,31 @@ func (m *Migrator) SQL(mg Migration, up bool) ([]string, error) {
 
 func (m *Migrator) run(ctx context.Context, mg Migration, up bool) error {
 	start := time.Now()
-	err := m.withSQLiteFKsOff(ctx, func(ctx context.Context) error {
-		return m.db.Transaction(ctx, func(ctx context.Context) error {
-			var s schema.Schema
-			if up {
-				mg.Up(&s)
-			} else {
-				mg.Down(&s)
-			}
-			if err := m.exec(ctx, &s); err != nil {
-				return err
-			}
-			tbl := m.db.Dialect().Quote(m.table)
-			if up {
-				_, err := m.db.Exec(ctx, "INSERT INTO "+tbl+" (version, name, applied_at) VALUES (?, ?, ?)",
-					mg.Version, mg.Name, time.Now().UTC())
-				return err
-			}
-			_, err := m.db.Exec(ctx, "DELETE FROM "+tbl+" WHERE version = ?", mg.Version)
+	var s schema.Schema
+	if up {
+		mg.Up(&s)
+	} else {
+		mg.Down(&s)
+	}
+	apply := func(ctx context.Context) error {
+		if err := m.exec(ctx, &s); err != nil {
 			return err
-		})
+		}
+		tbl := m.db.Dialect().Quote(m.table)
+		if up {
+			_, err := m.db.Exec(ctx, "INSERT INTO "+tbl+" (version, name, applied_at) VALUES (?, ?, ?)",
+				mg.Version, mg.Name, time.Now().UTC())
+			return err
+		}
+		_, err := m.db.Exec(ctx, "DELETE FROM "+tbl+" WHERE version = ?", mg.Version)
+		return err
+	}
+	err := m.withSQLiteFKsOff(ctx, func(ctx context.Context) error {
+		if needsNoTx(m.db.Dialect().Kind(), s.Ops) {
+			// CREATE INDEX CONCURRENTLY cannot run in a transaction.
+			return apply(ctx)
+		}
+		return m.db.Transaction(ctx, apply)
 	})
 	dir := "up"
 	if !up {
@@ -410,4 +415,17 @@ func (m *Migrator) locked(ctx context.Context, fn func() error) error {
 	}
 	defer conn.ExecContext(context.WithoutCancel(ctx), unlock) //nolint:errcheck
 	return fn()
+}
+
+// needsNoTx reports whether ops must run outside a transaction.
+func needsNoTx(k dialect.Kind, ops []schema.Op) bool {
+	if k != dialect.KindPostgres {
+		return false
+	}
+	for _, op := range ops {
+		if ix, ok := op.(schema.CreateIndex); ok && ix.Concurrently {
+			return true
+		}
+	}
+	return false
 }

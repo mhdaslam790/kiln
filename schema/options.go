@@ -85,6 +85,11 @@ func Name(name string) IndexOption { return func(i *CreateIndex) { i.Name = name
 // IndexIfNotExists skips creation when the index exists.
 func IndexIfNotExists() IndexOption { return func(i *CreateIndex) { i.IfNotExists = true } }
 
+// Concurrently builds the index without blocking writes on PostgreSQL
+// (CREATE INDEX CONCURRENTLY). Such a migration runs outside a transaction,
+// so keep the index alone in its migration. Other databases ignore it.
+func Concurrently() IndexOption { return func(i *CreateIndex) { i.Concurrently = true } }
+
 // PartialWhere makes a partial index: WHERE <predicate>.
 func PartialWhere(predicate string) IndexOption { return func(i *CreateIndex) { i.Where = predicate } }
 

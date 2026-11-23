@@ -247,6 +247,8 @@ func (s *State) Apply(op Op) error {
 		t.Indexes = idx
 	case Exec, Do:
 		s.Opaque++
+	case AllowUnsafe:
+		// lint marker only
 	default:
 		return fmt.Errorf("schema: cannot apply %T", op)
 	}

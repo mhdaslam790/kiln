@@ -40,14 +40,15 @@ kiln migrate up
 12. [Caching](#caching): query results (memory or Redis) and prepared statements
 13. [Migrations](#migrations)
 14. [Auto-generated migrations](#auto-generated-migrations)
-15. [Seeds](#seeds)
-16. [Testing your code](#testing-your-code)
-17. [Database notes](#database-notes)
-18. [Troubleshooting](#troubleshooting)
-19. [Compared with other Go libraries](#compared-with-other-go-libraries)
-20. [Performance](#performance)
-21. [Developing kiln](#developing-kiln)
-22. [License](#license)
+15. [Migration safety checks](#migration-safety-checks): `kiln lint` catches risky changes before production
+16. [Seeds](#seeds)
+17. [Testing your code](#testing-your-code)
+18. [Database notes](#database-notes)
+19. [Troubleshooting](#troubleshooting)
+20. [Compared with other Go libraries](#compared-with-other-go-libraries)
+21. [Performance](#performance)
+22. [Developing kiln](#developing-kiln)
+23. [License](#license)
 
 ---
 
@@ -306,6 +307,7 @@ Run commands from anywhere inside your module. Paths come from `kiln.json`.
 | `kiln new <name>` | Empty migration for hand-written changes or data migrations |
 | `kiln diff [name] [--dry-run] [--db] [--dsn url]` | Migration from model changes ([details](#auto-generated-migrations)) |
 | `kiln pull [table...] [--force] [--dsn url]` | Generate models from an existing database |
+| `kiln lint [--all] [--strict] [--dsn url]` | Check migrations for changes that are risky in production ([details](#migration-safety-checks)) |
 | `kiln gen [--check]` | Typed columns for every model (`models/kiln_cols.go`) ([details](#typed-columns-compile-time-checked)) |
 | `kiln migrate [up \| down [n] \| redo \| status \| sql] [--dsn url]` | Run migrations |
 | `kiln new-seed <name>` | New seeder file |
@@ -946,7 +948,85 @@ type Post struct {
   reports "schema is up to date". Running `diff` after `pull` also reports no changes.
 
 **Always read a generated migration before applying it.** It is an ordinary Go file, so you
-can edit it.
+can edit it. `kiln diff` also runs the [safety checks](#migration-safety-checks) on the
+migration it writes and prints anything risky.
+
+---
+
+## Migration safety checks
+
+A migration that works on your laptop can still break production: the table has millions of
+rows, the old version of the app is still serving traffic during the deploy, or a lock blocks
+every write for minutes. `kiln lint` reads your migrations and points these out **before**
+they run, with a safer way to do each one.
+
+```bash
+kiln lint                      # the newest migration
+DATABASE_URL=... kiln lint     # every migration not yet applied to that database
+kiln lint --all --strict       # every migration; fail on warnings too (good for CI)
+```
+
+```text
+20260301120000_drop_legacy
+  WARN  drop-column  users.legacy_score
+        drops the column and its data; the app version still running during the deploy breaks if it uses it
+        fix: first deploy code that no longer reads or writes it, then drop it in a later release
+        (reviewed? add s.AllowUnsafe("why", "drop-column") to the migration)
+
+checked 1 pending migration(s): 0 error(s), 1 warning(s), 0 info
+```
+
+Each migration is checked against the schema built by the migrations before it, so changes to
+a table created in the **same** migration are never reported (it is still empty).
+
+| Check | Level | What it catches |
+|---|---|---|
+| `not-null-without-default` | error | Adding a `NOT NULL` column with no default to an existing table: fails as soon as it has rows |
+| `concurrent-index-mixed` | error | A `Concurrently()` index together with other changes (PostgreSQL): those changes are no longer atomic |
+| `allow-unsafe-no-reason` | error | `s.AllowUnsafe` without a reason |
+| `drop-table`, `drop-column` | warning | Data loss, and the running app version breaks if it still uses them |
+| `rename-table`, `rename-column` | warning | The running app version breaks. Safer: add, backfill, switch, drop |
+| `change-column-type` | warning | Rewrites the table under a lock; may lose data if the type narrows |
+| `set-not-null` | warning | Fails if any row is still `NULL`. The fix shows the backfill |
+| `unique-on-existing` | warning | A unique index fails over duplicates. The fix shows the query that finds them |
+| `index-locks-writes` | warning | PostgreSQL: `CREATE INDEX` blocks writes while it builds. Use `schema.Concurrently()` |
+| `foreign-key-on-existing` | info | Every existing row is checked while locks are held |
+| `raw-sql` | info | `s.Exec` / `s.Do` steps cannot be checked |
+| `irreversible` | info | No `Down` function |
+
+Errors make `kiln lint` exit non-zero; with `--strict`, warnings do too.
+
+**Reviewed it and it's fine?** Say so in the migration. The reason is required, so the
+decision is recorded in the code for whoever reads it next:
+
+```go
+set.Add(20260301120000, "drop_legacy", func(s *schema.Schema) {
+	s.AllowUnsafe("legacy_score unused since v2.3", "drop-column")
+	s.DropColumn("users", "legacy_score")
+}, func(s *schema.Schema) {
+	s.AddColumn("users", "legacy_score", schema.Int)
+})
+```
+
+Without check names, `AllowUnsafe` silences every check in that migration.
+
+**Indexes without downtime (PostgreSQL).** `schema.Concurrently()` builds the index without
+blocking writes. kiln runs that migration outside a transaction automatically, because
+PostgreSQL refuses `CREATE INDEX CONCURRENTLY` inside one. Keep the index alone in its
+migration; other databases ignore the option.
+
+```go
+s.CreateIndex("orders", "", []string{"customer_id"}, schema.Concurrently())
+```
+
+In Go code, the same checks are available as `migrate.Lint(kind, migrations, filter)` and
+`migrator.LintPending(ctx)`.
+
+**In CI:**
+
+```yaml
+- run: go run github.com/mhdaslam790/kiln@latest lint --all --strict
+```
 
 ---
 
@@ -1059,6 +1139,7 @@ An honest overview. Every tool here is good, and they make different trade-offs.
 | Migration files generated from model changes | ✗ (AutoMigrate, no files) | ✓ through Atlas (needs a dev database) | ✗ hand-written | ✗ hand-written | ✓ without a database, or against the live one |
 | Generators that edit your structs (`add-column`, ...) | ✗ | ✗ | ✗ | ✗ | ✓ |
 | Built-in query cache with automatic invalidation | ✗ (plugins) | ✗ (separate package) | ✗ | ✗ | ✓ memory or Redis |
+| Migration safety checks (lint) | ✗ | ✓ through Atlas | ✗ | ✗ | ✓ `kiln lint` |
 | Typed mocks for unit tests | ✗ (sqlmock) | ✗ (real SQLite) | ✗ | `reltest` (untyped) | ✓ `ormtest` |
 | SQL Server | ✓ | ✗ | ✓ | ✓ | ✓ (newest, least battle-tested) |
 | Maturity and ecosystem | very large | large | medium | small | **new** |

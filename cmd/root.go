@@ -210,6 +210,31 @@ automatically. Run it again after editing models by hand, or add
 	}
 	genCmd.Flags().BoolVar(&gopts.Check, "check", false, "fail if kiln_cols.go is out of date instead of writing it")
 
+	// lint
+	var lo gen.LintOptions
+	lintCmd := &cobra.Command{
+		Use:   "lint",
+		Short: "Check migrations for changes that are risky in production",
+		Long: `Checks migrations for operations that can break production: data loss
+(dropping tables or columns), statements that fail once tables hold rows
+(NOT NULL without a default, unique indexes over duplicates), long write
+locks (CREATE INDEX on PostgreSQL), and renames that break the app version
+still running during a deploy.
+
+With DATABASE_URL (or --dsn) it checks the migrations not yet applied;
+without one, the newest migration. --all checks every migration.
+
+Errors fail the command; --strict fails on warnings too (useful in CI).
+After reviewing a finding, silence it in the migration with
+  s.AllowUnsafe("why it is safe", "check-name")`,
+		Example: "  kiln lint\n  kiln lint --all --strict\n  kiln lint --dsn $DATABASE_URL",
+		Args:    cobra.NoArgs,
+		RunE:    run(func(p *gen.Project, a []string) error { return p.Lint(lo) }),
+	}
+	lintCmd.Flags().BoolVar(&lo.All, "all", false, "check every migration")
+	lintCmd.Flags().BoolVar(&lo.Strict, "strict", false, "fail on warnings too")
+	lintCmd.Flags().StringVar(&lo.DSN, "dsn", "", "database URL (overrides DATABASE_URL)")
+
 	// pull
 	var po gen.PullOptions
 	pullCmd := &cobra.Command{
@@ -245,5 +270,5 @@ The generated schema tags make 'kiln diff --db' report no changes.`,
 	seedCmd.Flags().StringVar(&seedDSN, "dsn", "", "database URL (overrides DATABASE_URL)")
 
 	rootCmd.AddCommand(initCmd, newCmd, createCmd, addColumnCmd, dropColumnCmd, renameColumnCmd, genCmd,
-		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, pullCmd, newSeedCmd, seedCmd)
+		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, pullCmd, newSeedCmd, seedCmd)
 }
