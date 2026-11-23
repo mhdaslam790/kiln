@@ -1259,25 +1259,31 @@ kiln's repository API was inspired by rel:
 
 ## Performance
 
-Benchmarks run on SQLite (`cd integration && go test -run '^$' -bench . -benchmem`), next to a
-hand-written `database/sql` baseline:
+kiln's own cost, measured against an instant in-memory driver so the database's time doesn't
+hide it (`go test -run '^$' -bench . ./orm`), next to hand-written `database/sql` code:
 
-| Benchmark (Apple M-series) | Time | Allocations |
-|---|---|---|
-| `FindAll`, 1,000 rows | 1.13 ms | 17.8k |
-| hand-written `database/sql`, same query | 0.99 ms | 16.8k |
-| `PreloadAll`, 100 users × 10 posts | 0.61 ms | 6.6k |
-| `InsertAll`, 100 rows | 0.68 ms | 1.7k |
-| `FindByID` | 10 µs | 69 |
+| Operation (Apple M-series) | kiln | Hand-written | kiln's extra cost |
+|---|---|---|---|
+| `FindByID` | 0.9 µs, 21 allocs | 0.33 µs, 9 allocs | ~0.6 µs |
+| `FindAll`, 100 rows | 18 µs, 323 allocs | 15 µs, 315 allocs | ~30 ns per row |
+| `Insert` | 1.2 µs, 28 allocs | 0.39 µs, 13 allocs | ~0.8 µs |
+| `Update` | 0.85 µs, 15 allocs | 0.19 µs, 5 allocs | ~0.7 µs |
 
-Rows are scanned with a column plan built once per query and reused holders, so the ORM
-costs about 15% over hand-written scanning. Identifiers are quoted once and cached.
+A round trip to a real database takes 200–2,000 µs, so kiln adds well under 1% to a typical
+query. On SQLite (`cd integration && go test -run '^$' -bench . -benchmem`), loading 1,000
+rows takes the same time as hand-written code and allocates less (15.8k vs 16.8k).
 
-**Why reflection rather than generated scanning code?** On SQLite, which runs in-process
-and has no network, kiln adds about 0.14 ms per 1,000 rows over hand-written code. On a
-networked database a single round trip usually costs more than that, so code generation
-would make models harder to work with for a gain you would rarely measure. If you need
-those last microseconds, the result cache removes the database trip entirely.
+How it stays fast, with nothing to configure:
+
+- the column plan for each model is built once and cached, and row readers are pooled;
+- plain fields (`string`, `int`, `int64`, `float64`, `bool`, `time.Time`) are written straight
+  into the struct without temporary values; `NULL` still becomes the zero value;
+- SQL is built in a pre-sized buffer, and quoted identifiers are cached.
+
+**Why reflection rather than generated scanning code?** With the optimisations above, the
+remaining gap is a few hundred nanoseconds per query, less than any network round trip.
+Generated code would make models harder to work with for a gain you would rarely measure.
+If you need those last microseconds, the result cache removes the database trip entirely.
 
 **Caching**: `FindByID` on local servers, in µs per call. Run it with
 `PG_DSN=... MYSQL_DSN=... REDIS_ADDR=... go test -run '^$' -bench Caching -benchmem`:
