@@ -23,11 +23,25 @@ type Config struct {
 	Models     string `json:"models"`
 	Runner     string `json:"runner"`
 	Seeds      string `json:"seeds"`
+	// Where `kiln scaffold` writes repository implementations and usecases.
+	Repositories string `json:"repositories,omitempty"`
+	Usecases     string `json:"usecases,omitempty"`
 }
 
 // DefaultConfig is used when no kiln.json exists.
 func DefaultConfig() Config {
-	return Config{Dialect: "postgres", Migrations: "db/migrations", Models: "models", Runner: "cmd/migrate", Seeds: "db/seeds"}
+	return Config{
+		Dialect: "postgres", Migrations: "database/migrations", Models: "internal/domain",
+		Runner: "cmd/migrate", Seeds: "database/seeds",
+		Repositories: DefaultRepositories, Usecases: DefaultUsecases,
+	}
+}
+
+// FlatConfig is the layout without layers: models/ at the top level.
+func FlatConfig() Config {
+	c := DefaultConfig()
+	c.Models, c.Repositories, c.Usecases = "models", "", ""
+	return c
 }
 
 // Project is the user's Go module.

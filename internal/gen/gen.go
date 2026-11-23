@@ -55,6 +55,9 @@ func (p *Project) Init(cfg Config, force bool) error {
 	p.Out("created %s", p.rel(runner))
 	p.Out("\nnext steps:\n  go get %s@latest %s\n  kiln create User name:string email:string:unique\n  DATABASE_URL=%q kiln migrate up",
 		libPath, d.Import, d.DSNExample)
+	if cfg.Repositories != "" {
+		p.Out("  kiln scaffold User   # optional: repository interface, kiln implementation and usecase")
+	}
 	return nil
 }
 

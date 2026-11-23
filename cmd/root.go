@@ -47,6 +47,7 @@ func init() {
 	// init
 	var cfg gen.Config
 	var force bool
+	var layout string
 	var initCmd *cobra.Command
 	initCmd = &cobra.Command{
 		Use:   "init",
@@ -68,6 +69,15 @@ current kiln.json values.`,
 			keep("models", &cfg.Models, p.Config.Models)
 			keep("runner", &cfg.Runner, p.Config.Runner)
 			keep("seeds", &cfg.Seeds, p.Config.Seeds)
+			if layout == "flat" && !fl.Changed("models") {
+				cfg.Models = gen.FlatConfig().Models
+			}
+			if layout != "flat" {
+				keep("repositories", &cfg.Repositories, p.Config.Repositories)
+				keep("usecases", &cfg.Usecases, p.Config.Usecases)
+			} else {
+				cfg.Repositories, cfg.Usecases = "", ""
+			}
 			return p.Init(cfg, force)
 		}),
 	}
@@ -77,6 +87,9 @@ current kiln.json values.`,
 	initCmd.Flags().StringVar(&cfg.Models, "models", def.Models, "models package directory")
 	initCmd.Flags().StringVar(&cfg.Runner, "runner", def.Runner, "directory of the generated migrate command")
 	initCmd.Flags().StringVar(&cfg.Seeds, "seeds", def.Seeds, "seeds package directory")
+	initCmd.Flags().StringVar(&cfg.Repositories, "repositories", def.Repositories, "where kiln scaffold writes repository implementations")
+	initCmd.Flags().StringVar(&cfg.Usecases, "usecases", def.Usecases, "where kiln scaffold writes usecases")
+	initCmd.Flags().StringVar(&layout, "layout", "clean", "clean (internal/domain, database/) | flat (models/, database/)")
 	initCmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
 
 	// new
@@ -210,6 +223,27 @@ automatically. Run it again after editing models by hand, or add
 	}
 	genCmd.Flags().BoolVar(&gopts.Check, "check", false, "fail if kiln_cols.go is out of date instead of writing it")
 
+	// scaffold
+	var so gen.ScaffoldOptions
+	scaffoldCmd := &cobra.Command{
+		Use:   "scaffold <Model>",
+		Short: "Write a repository interface, its kiln implementation and a usecase for a model",
+		Long: `Writes clean-architecture layers for an existing model, once:
+
+  internal/domain/user_repository.go      UserRepository interface (the port)
+  internal/repository/user_repository.go  kiln implementation
+  internal/usecase/user_usecase.go        usecase depending only on the interface
+
+They are a starting point: trim the interface to what the usecase needs and
+add specific methods (FindByEmail...). Use it for models with business
+logic; simple models can use orm.For[T](db) directly. Existing files are
+never overwritten without --force.`,
+		Example: "  kiln scaffold User",
+		Args:    cobra.ExactArgs(1),
+		RunE:    run(func(p *gen.Project, a []string) error { return p.Scaffold(a[0], so) }),
+	}
+	scaffoldCmd.Flags().BoolVar(&so.Force, "force", false, "overwrite existing layer files")
+
 	// lint
 	var lo gen.LintOptions
 	lintCmd := &cobra.Command{
@@ -270,5 +304,5 @@ The generated schema tags make 'kiln diff --db' report no changes.`,
 	seedCmd.Flags().StringVar(&seedDSN, "dsn", "", "database URL (overrides DATABASE_URL)")
 
 	rootCmd.AddCommand(initCmd, newCmd, createCmd, addColumnCmd, dropColumnCmd, renameColumnCmd, genCmd,
-		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, pullCmd, newSeedCmd, seedCmd)
+		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, scaffoldCmd, pullCmd, newSeedCmd, seedCmd)
 }
