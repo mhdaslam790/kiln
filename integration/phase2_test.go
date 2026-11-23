@@ -281,6 +281,12 @@ func TestInspectAndDiff(t *testing.T) {
 		up := migrate.New(db, append(migrations(), migrate.Migration{Version: 20990101000000, Name: "auto", Up: opsFunc(res.Up), Down: opsFunc(res.Down)}))
 		_, err = up.Up(ctx)
 		must(t, err)
+		rolledBack := false
+		t.Cleanup(func() { // leave a clean database for the next test even on failure
+			if !rolledBack {
+				_, _ = up.Down(ctx, 1)
+			}
+		})
 		st2, err := migrate.Inspect(ctx, db)
 		must(t, err)
 		again, err := migrate.DiffFor(db.Dialect(), st2, User{}, Post{}, Comment{}, Profile{}, PostTag{})
@@ -290,6 +296,7 @@ func TestInspectAndDiff(t *testing.T) {
 		}
 		_, err = up.Down(ctx, 1)
 		must(t, err)
+		rolledBack = true
 		st3, _ := migrate.Inspect(ctx, db)
 		if st3.Tables["profiles"].Column("website") != nil {
 			t.Fatal("down did not drop website")

@@ -81,7 +81,13 @@ func (d *sqlDialect) DDL(op schema.Op) ([]Stmt, error) {
 		return stmts, nil
 
 	case schema.DropColumn:
-		return one("ALTER TABLE " + t(o.Table) + " DROP COLUMN " + t(o.Name))
+		drop := Stmt{SQL: "ALTER TABLE " + t(o.Table) + " DROP COLUMN " + t(o.Name)}
+		if d.kind == KindMSSQL {
+			// SQL Server refuses to drop a column that still has a default
+			// constraint (often auto-named, e.g. DF__users__age__3A81B327).
+			return []Stmt{d.mssqlDropDefault(o.Table, o.Name), drop}, nil
+		}
+		return []Stmt{drop}, nil
 
 	case schema.RenameColumn:
 		if d.kind == KindMSSQL {
@@ -252,7 +258,18 @@ func (d *sqlDialect) changeColumn(o schema.ChangeColumn) ([]Stmt, error) {
 		} else {
 			s += " NULL"
 		}
-		return []Stmt{{SQL: s}}, nil
+		// A default constraint blocks ALTER COLUMN, and SQL Server keeps
+		// defaults as separate constraints: drop it, alter, then re-add.
+		stmts := []Stmt{d.mssqlDropDefault(o.Table, c.Name), {SQL: s}}
+		if c.HasDef {
+			lit, err := d.literal(c.Default)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, Stmt{SQL: "ALTER TABLE " + t + " ADD CONSTRAINT " +
+				d.Quote("DF_"+o.Table+"_"+c.Name) + " DEFAULT " + lit + " FOR " + d.Quote(c.Name)})
+		}
+		return stmts, nil
 	}
 	typ, err := d.columnType(c)
 	if err != nil {
@@ -412,6 +429,16 @@ func (d *sqlDialect) literal(v any) (string, error) {
 		return sqlString(x.UTC().Format("2006-01-02 15:04:05")), nil
 	}
 	return "", fmt.Errorf("dialect: unsupported default value %T", v)
+}
+
+// mssqlDropDefault drops the default constraint of table.column, whatever
+// its name, if there is one.
+func (d *sqlDialect) mssqlDropDefault(table, column string) Stmt {
+	return Stmt{SQL: "DECLARE @df sysname; " +
+		"SELECT @df = dc.name FROM sys.default_constraints dc " +
+		"JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id " +
+		"WHERE dc.parent_object_id = OBJECT_ID(" + sqlString(d.Quote(table)) + ") AND c.name = " + sqlString(column) + "; " +
+		"IF @df IS NOT NULL EXEC('ALTER TABLE " + strings.ReplaceAll(d.Quote(table), "'", "''") + " DROP CONSTRAINT ' + QUOTENAME(@df))"}
 }
 
 func sqlString(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
