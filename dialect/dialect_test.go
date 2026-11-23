@@ -289,12 +289,12 @@ DROP INDEX "uniq_people_email";
 ERR: dialect: SQLite cannot change a column; recreate the table`,
 		KindMSSQL: `ALTER TABLE [users] ADD [nickname] NVARCHAR(255) DEFAULT 'anon';
 EXEC sp_rename 'users.name', 'full_name', 'COLUMN';
-DECLARE @df sysname; SELECT @df = dc.name FROM sys.default_constraints dc JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id WHERE dc.parent_object_id = OBJECT_ID('[users]') AND c.name = 'legacy'; IF @df IS NOT NULL EXEC('ALTER TABLE [users] DROP CONSTRAINT ' + QUOTENAME(@df));
+DECLARE @df sysname, @sql nvarchar(max); SELECT @df = dc.name FROM sys.default_constraints dc JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id WHERE dc.parent_object_id = OBJECT_ID('[users]') AND c.name = 'legacy'; IF @df IS NOT NULL BEGIN SET @sql = N'ALTER TABLE [users] DROP CONSTRAINT ' + QUOTENAME(@df); EXEC sp_executesql @sql; END;
 ALTER TABLE [users] DROP COLUMN [legacy];
 EXEC sp_rename 'users', 'people';
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'uniq_people_email' AND object_id = OBJECT_ID('people')) CREATE UNIQUE INDEX [uniq_people_email] ON [people] ([email]);
 DROP INDEX [uniq_people_email] ON [people];
-DECLARE @df sysname; SELECT @df = dc.name FROM sys.default_constraints dc JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id WHERE dc.parent_object_id = OBJECT_ID('[people]') AND c.name = 'age'; IF @df IS NOT NULL EXEC('ALTER TABLE [people] DROP CONSTRAINT ' + QUOTENAME(@df));
+DECLARE @df sysname, @sql nvarchar(max); SELECT @df = dc.name FROM sys.default_constraints dc JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id WHERE dc.parent_object_id = OBJECT_ID('[people]') AND c.name = 'age'; IF @df IS NOT NULL BEGIN SET @sql = N'ALTER TABLE [people] DROP CONSTRAINT ' + QUOTENAME(@df); EXEC sp_executesql @sql; END;
 ALTER TABLE [people] ALTER COLUMN [age] BIGINT NOT NULL`,
 	})
 }

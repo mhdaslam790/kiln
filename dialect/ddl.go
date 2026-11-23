@@ -434,11 +434,15 @@ func (d *sqlDialect) literal(v any) (string, error) {
 // mssqlDropDefault drops the default constraint of table.column, whatever
 // its name, if there is one.
 func (d *sqlDialect) mssqlDropDefault(table, column string) Stmt {
-	return Stmt{SQL: "DECLARE @df sysname; " +
+	// EXEC('...' + f()) does not allow function calls, so the statement is
+	// built in a variable and run with sp_executesql.
+	return Stmt{SQL: "DECLARE @df sysname, @sql nvarchar(max); " +
 		"SELECT @df = dc.name FROM sys.default_constraints dc " +
 		"JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id " +
 		"WHERE dc.parent_object_id = OBJECT_ID(" + sqlString(d.Quote(table)) + ") AND c.name = " + sqlString(column) + "; " +
-		"IF @df IS NOT NULL EXEC('ALTER TABLE " + strings.ReplaceAll(d.Quote(table), "'", "''") + " DROP CONSTRAINT ' + QUOTENAME(@df))"}
+		"IF @df IS NOT NULL BEGIN " +
+		"SET @sql = N" + sqlString("ALTER TABLE "+d.Quote(table)+" DROP CONSTRAINT ") + " + QUOTENAME(@df); " +
+		"EXEC sp_executesql @sql; END"}
 }
 
 func sqlString(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
