@@ -19,7 +19,7 @@ err = db.Transaction(ctx, func(ctx context.Context) error {
 
 ```bash
 kiln create Post title:string body:text user:references   # model + migration
-# ...edit models/post.go by hand...
+# ...edit internal/domain/post.go by hand...
 kiln diff add_post_slug                                    # migration written for you
 kiln migrate up
 ```
@@ -92,23 +92,31 @@ go get github.com/jackc/pgx/v5/stdlib
 This creates:
 
 ```
-kiln.json                # configuration (see below)
-db/migrations/migrations.go  # `var Set migrate.Set`: every migration registers here
-db/seeds/seeds.go            # `var Set seed.Set`: every seeder registers here
-cmd/migrate/main.go          # a small program that runs migrations and seeds; edit it freely
+kiln.json                          # configuration (see below)
+database/migrations/migrations.go  # `var Set migrate.Set`: every migration registers here
+database/seeds/seeds.go            # `var Set seed.Set`: every seeder registers here
+cmd/migrate/main.go                # a small program that runs migrations and seeds; edit it freely
 ```
+
+Models go in `internal/domain` (created by your first `kiln create`). See
+[Project layout](#project-layout-clean-architecture) for how the folders fit together.
 
 `kiln.json`:
 
 ```json
 {
   "dialect": "postgres",
-  "migrations": "db/migrations",
-  "models": "models",
+  "migrations": "database/migrations",
+  "models": "internal/domain",
   "runner": "cmd/migrate",
-  "seeds": "db/seeds"
+  "seeds": "database/seeds",
+  "repositories": "internal/repository",
+  "usecases": "internal/usecase"
 }
 ```
+
+Prefer models at the top level without layers? `kiln init --layout flat` uses `models/`
+instead of `internal/domain`. Every path is a setting, so you can also pick your own.
 
 ### 2. Generate models and migrations
 
@@ -120,7 +128,7 @@ kiln create Post title:string:limit=200 body:text user:references published:bool
 Each `create` writes a model and a migration:
 
 ```go
-// models/post.go
+// internal/domain/post.go
 type Post struct {
 	ID        int64     `db:"id,primary"`
 	Title     string    `db:"title" schema:"limit:200"`
@@ -131,7 +139,7 @@ type Post struct {
 	UpdatedAt time.Time `db:"updated_at"`
 }
 
-// db/migrations/20261123120000_create_posts.go
+// database/migrations/20261123120000_create_posts.go
 func init() {
 	Set.Add(20261123120000, "create_posts",
 		func(s *schema.Schema) {
@@ -185,7 +193,7 @@ import (
 	"github.com/mhdaslam790/kiln/orm"
 	"github.com/mhdaslam790/kiln/q"
 
-	"example.com/app/models"
+	"example.com/app/internal/domain"
 )
 
 func main() {
@@ -196,13 +204,13 @@ func main() {
 	}
 	defer db.Close()
 
-	users := orm.For[models.User](db)
-	u := models.User{Name: "Ada", Email: "ada@example.com"}
+	users := orm.For[domain.User](db)
+	u := domain.User{Name: "Ada", Email: "ada@example.com"}
 	if err := users.Insert(ctx, &u); err != nil { // fills u.ID, CreatedAt, UpdatedAt
 		log.Fatal(err)
 	}
 
-	posts := orm.For[models.Post](db)
+	posts := orm.For[domain.Post](db)
 	latest, err := posts.FindAll(ctx, q.Eq("user_id", u.ID), q.Sort("-created_at"), q.Limit(10))
 	log.Println(latest, err)
 }
@@ -224,6 +232,66 @@ kiln diff add_slugs
 kiln migrate up
 ```
 
+### Project layout (clean architecture)
+
+```
+cmd/
+  migrate/main.go          # migration + seed runner
+  api/main.go              # your app: wires the layers together
+database/                  # infrastructure only: schema history and starting data
+  migrations/
+  seeds/
+internal/
+  domain/                  # entities (your models), repository interfaces, domain errors
+    user.go
+    user_repository.go     # ← kiln scaffold User
+    errors.go
+    kiln_cols.go           # ← kiln gen
+  repository/              # kiln implementations of the domain interfaces
+    user_repository.go     # ← kiln scaffold User
+  usecase/                 # business rules; depends only on domain
+    user_usecase.go        # ← kiln scaffold User
+kiln.json
+```
+
+Dependencies point inwards: `usecase` → `domain` ← `repository`. Usecases never import kiln,
+so they can be unit tested with a fake repository.
+
+**Layers are opt-in.** `kiln create` writes only the entity and its migration. Run
+`kiln scaffold User` for models with business logic; it writes the three files once, as a
+starting point you then edit:
+
+```go
+// internal/domain/user_repository.go: trim it to what the usecase needs
+type UserRepository interface {
+	FindByID(ctx context.Context, id int64) (User, error)
+	FindByEmail(ctx context.Context, email string) (User, error) // added by you
+	Create(ctx context.Context, rec *User) error
+}
+
+// internal/repository/user_repository.go
+func (r *userRepository) FindByEmail(ctx context.Context, email string) (domain.User, error) {
+	u, err := r.repo.Find(ctx, domain.UserCols.Email.Eq(email))
+	return u, mapErr(err) // orm.ErrNotFound becomes domain.ErrNotFound
+}
+
+// cmd/api/main.go
+users := usecase.NewUserUsecase(repository.NewUserRepository(db))
+```
+
+Simple models (lookup tables, join tables) don't need layers: use `orm.For[domain.Tag](db)`
+directly. `scaffold` never overwrites your edits unless you pass `--force`.
+
+**Where business logic goes:** in `domain` and `usecase`, not in `database/`. Migrations are
+frozen history, so logic copied into them never gets updated. A seed that needs rules (hashing
+a password, validating input) should call the usecase:
+
+```go
+// database/seeds/20261123_admin_user.go
+uc := usecase.NewUserUsecase(repository.NewUserRepository(db))
+return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
+```
+
 ---
 
 ## How it works
@@ -231,7 +299,7 @@ kiln migrate up
 ```
              ┌──────────────────────────── your module ───────────────────────────┐
              │                                                                    │
- kiln        │  models/*.go             db/migrations/*.go          db/seeds/*.go │
+ kiln        │  domain/*.go              database/migrations/   database/seeds/   │
  CLI writes  │  (structs + tags)        (schema DSL in Go)          (Go funcs)    │
  and edits   │      │    │                     │                           │      │
  these files │      │    └────── kiln diff ───┤ replays migrations in      │      │
@@ -297,18 +365,19 @@ Run commands from anywhere inside your module. Paths come from `kiln.json`.
 
 | Command | What it does |
 |---|---|
-| `kiln init [-d dialect] [--migrations dir] [--models dir] [--runner dir] [--seeds dir] [--force]` | Create the config, the migrations and seeds packages, and the runner. With `--force`, it re-runs and regenerates the runner, keeping config values for flags you omit. |
+| `kiln init [-d dialect] [--layout clean\|flat] [--migrations dir] [--models dir] [--runner dir] [--seeds dir] [--repositories dir] [--usecases dir] [--force]` | Create the config, the migrations and seeds packages, and the runner. With `--force`, it re-runs and regenerates the runner, keeping config values for flags you omit. |
 | `kiln create <Model> field:type... [--soft-delete] [--no-timestamps] [--table name]` | New model + create-table migration |
 | `kiln add-column <Model> field:type...` | Add fields to the model + migration |
 | `kiln drop-column <Model> column...` | Remove fields + migration. The Down restores the columns. |
 | `kiln rename-column <Model> old new` | Rename a field/column + migration |
 | `kiln add-index <Model\|table> column... [-u]` | Index (or unique index) migration |
 | `kiln drop-index <Model\|table> column... [-u]` | Drop-index migration |
+| `kiln scaffold <Model> [--force]` | Repository interface, kiln implementation and usecase for a model, written once ([details](#project-layout-clean-architecture)) |
 | `kiln new <name>` | Empty migration for hand-written changes or data migrations |
 | `kiln diff [name] [--dry-run] [--db] [--dsn url]` | Migration from model changes ([details](#auto-generated-migrations)) |
 | `kiln pull [table...] [--force] [--dsn url]` | Generate models from an existing database |
 | `kiln lint [--all] [--strict] [--dsn url]` | Check migrations for changes that are risky in production ([details](#migration-safety-checks)) |
-| `kiln gen [--check]` | Typed columns for every model (`models/kiln_cols.go`) ([details](#typed-columns-compile-time-checked)) |
+| `kiln gen [--check]` | Typed columns for every model (`internal/domain/kiln_cols.go`) ([details](#typed-columns-compile-time-checked)) |
 | `kiln migrate [up \| down [n] \| redo \| status \| sql] [--dsn url]` | Run migrations |
 | `kiln new-seed <name>` | New seeder file |
 | `kiln seed [name...] [--dsn url]` | Run all seeders, or only the named ones |
@@ -434,18 +503,18 @@ Column names as strings (`q.Eq("emial", x)`) compile even when misspelled. Run
 **column name** and the **value type**:
 
 ```bash
-kiln gen        # writes models/kiln_cols.go
+kiln gen        # writes internal/domain/kiln_cols.go
 ```
 
 ```go
-c := models.UserCols
+c := domain.UserCols
 
 adults, err := users.FindAll(ctx, c.Age.Gte(18), c.Status.Eq("active"), c.CreatedAt.Desc())
 u, err := users.Find(ctx, c.Email.Eq("ann@x.io"))
 n, err := users.UpdateAny(ctx, c.Email.In("a@x.io", "b@x.io"), c.Status.Set("active"), c.Age.Inc(1))
 err = db.Select(ctx, &names, users.Query(q.Select(q.Names(c.Name)...), c.Name.Asc()))
 
-users.Find(ctx, c.Emial.Eq("x"))   // compile error: type models.userCols has no field or method Emial
+users.Find(ctx, c.Emial.Eq("x"))   // compile error: type domain.userCols has no field or method Emial
 users.Find(ctx, c.Age.Eq("ten"))   // compile error: cannot use "ten" as int value
 ```
 
@@ -888,7 +957,7 @@ Unsigned`, plus `SQLType("CITEXT")` for a database-specific type. Index options:
 You can edit model structs directly and let kiln write the migration:
 
 ```bash
-kiln diff                  # writes db/migrations/<ts>_auto.go
+kiln diff                  # writes database/migrations/<ts>_auto.go
 kiln diff add_slugs        # ...named add_slugs
 kiln diff --dry-run        # print only
 kiln diff --db             # compare with the live database instead of the migrations
@@ -1033,7 +1102,7 @@ In Go code, the same checks are available as `migrate.Lint(kind, migrations, fil
 ## Seeds
 
 ```bash
-kiln new-seed admin_user     # db/seeds/<ts>_admin_user.go
+kiln new-seed admin_user     # database/seeds/<ts>_admin_user.go
 kiln seed                    # run all, in file order
 kiln seed admin_user         # run only this one
 ```
@@ -1041,8 +1110,8 @@ kiln seed admin_user         # run only this one
 ```go
 func init() {
 	Set.Add("admin_user", func(ctx context.Context, db *orm.DB) error {
-		return orm.For[models.User](db).Insert(ctx,
-			&models.User{Name: "Admin", Email: "admin@example.com"},
+		return orm.For[domain.User](db).Insert(ctx,
+			&domain.User{Name: "Admin", Email: "admin@example.com"},
 			orm.OnConflictDoNothing("email")) // seeders should be safe to re-run
 	})
 }
