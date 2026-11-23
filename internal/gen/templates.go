@@ -106,6 +106,7 @@ import (
 	_ %[1]q
 
 	"%[7]s/dialect"
+	"%[7]s/env"
 	"%[7]s/migrate"
 	"%[7]s/orm"
 
@@ -121,9 +122,12 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
+	if err := env.Load(); err != nil { // .env, if present; real env vars win
+		return err
+	}
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		return fmt.Errorf("DATABASE_URL is not set")
+		return fmt.Errorf("DATABASE_URL is not set: add it to .env or export it")
 	}
 	db, err := orm.Connect(ctx, %[2]q, dsn, dialect.%[3]s())
 	if err != nil {

@@ -218,7 +218,7 @@ func (p *Project) Diff(o DiffOptions) error {
 		env = append(env, "DATABASE_URL="+o.DSN)
 	}
 	if o.DB && o.DSN == "" && os.Getenv("DATABASE_URL") == "" {
-		return errors.New("--db needs DATABASE_URL or --dsn")
+		return errors.New("--db needs DATABASE_URL (in .env or the environment) or --dsn")
 	}
 	var out diffOutput
 	if err := p.runProgram(src.String(), env, &out); err != nil {
@@ -300,7 +300,7 @@ func main() {
 	if o.DSN != "" {
 		env = append(env, "DATABASE_URL="+o.DSN)
 	} else if os.Getenv("DATABASE_URL") == "" {
-		return errors.New("pull needs DATABASE_URL or --dsn")
+		return errors.New("pull needs DATABASE_URL (in .env or the environment) or --dsn")
 	}
 	var out struct {
 		State *schema.State `json:"state"`

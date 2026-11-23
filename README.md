@@ -96,6 +96,7 @@ kiln.json                          # configuration (see below)
 database/migrations/migrations.go  # `var Set migrate.Set`: every migration registers here
 database/seeds/seeds.go            # `var Set seed.Set`: every seeder registers here
 cmd/migrate/main.go                # a small program that runs migrations and seeds; edit it freely
+.env                               # your DATABASE_URL; added to .gitignore, never committed
 ```
 
 Models go in `internal/domain` (created by your first `kiln create`). See
@@ -162,8 +163,16 @@ Migrations are plain Go files, so you can edit them, review them, and keep them 
 
 ### 3. Run the migrations
 
+Put your database URL in `.env` once (`kiln init` created it with an example):
+
 ```bash
-export DATABASE_URL="postgres://user:pass@localhost:5432/app?sslmode=disable"
+# .env
+DATABASE_URL=postgres://user:pass@localhost:5432/app?sslmode=disable
+```
+
+Every kiln command reads it, so there is nothing to export in each terminal:
+
+```bash
 kiln migrate sql      # preview the SQL (dry run)
 kiln migrate up       # apply
 kiln migrate status   # see what is applied
@@ -176,6 +185,9 @@ binary and run it directly, with no CLI needed:
 go build -o bin/migrate ./cmd/migrate
 DATABASE_URL=... ./bin/migrate up
 ```
+
+A real environment variable always wins over `.env`, so production servers that set
+`DATABASE_URL` are never affected by a `.env` file.
 
 ### 4. Use the ORM in your application
 
@@ -190,6 +202,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/mhdaslam790/kiln/dialect"
+	"github.com/mhdaslam790/kiln/env"
 	"github.com/mhdaslam790/kiln/orm"
 	"github.com/mhdaslam790/kiln/q"
 
@@ -197,6 +210,7 @@ import (
 )
 
 func main() {
+	env.Load() // reads .env if present; real environment variables win
 	ctx := context.Background()
 	db, err := orm.Connect(ctx, "pgx", os.Getenv("DATABASE_URL"), dialect.Postgres())
 	if err != nil {
@@ -382,7 +396,8 @@ Run commands from anywhere inside your module. Paths come from `kiln.json`.
 | `kiln new-seed <name>` | New seeder file |
 | `kiln seed [name...] [--dsn url]` | Run all seeders, or only the named ones |
 
-The database URL comes from `DATABASE_URL`, or from `--dsn` when you pass it.
+The database URL comes from `--dsn` when you pass it, otherwise from the `DATABASE_URL`
+environment variable, otherwise from `DATABASE_URL` in the project's `.env` file.
 
 ### Field syntax
 
@@ -1030,8 +1045,8 @@ every write for minutes. `kiln lint` reads your migrations and points these out 
 they run, with a safer way to do each one.
 
 ```bash
-kiln lint                      # the newest migration
-DATABASE_URL=... kiln lint     # every migration not yet applied to that database
+kiln lint                      # migrations not yet applied (DATABASE_URL set, e.g. in .env),
+                               # otherwise the newest migration
 kiln lint --all --strict       # every migration; fail on warnings too (good for CI)
 ```
 
@@ -1188,7 +1203,7 @@ SQL-generation tests, and by the integration suite when `MSSQL_DSN` is set.
 |---|---|
 | Scan error into `time.Time` on MySQL | Add `parseTime=true` to the DSN |
 | Foreign keys not enforced on SQLite | Add `_pragma=foreign_keys(1)` to the DSN |
-| `DATABASE_URL is not set` | `export DATABASE_URL=...` or pass `--dsn` |
+| `DATABASE_URL is not set` | Add `DATABASE_URL=...` to `.env` in the project root, export it, or pass `--dsn` |
 | `go.mod not found` | Run kiln inside your module, after `go mod init` |
 | `diff`/`pull`: `cannot find package` | `go get` the library and your driver, then `go mod tidy` |
 | `applied but missing from code` | A migration file was deleted after being applied. Restore it, or delete its row from `schema_migrations`. |

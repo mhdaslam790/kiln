@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mhdaslam790/kiln/env"
 	"go/format"
 	"os"
 	"path/filepath"
@@ -88,6 +89,11 @@ func Load(dir string) (*Project, error) {
 		if p.Config.Seeds == "" {
 			p.Config.Seeds = DefaultConfig().Seeds
 		}
+	}
+	// .env in the project root supplies DATABASE_URL etc.; real
+	// environment variables win. Programs kiln runs inherit them.
+	if err := env.Load(filepath.Join(root, ".env")); err != nil {
+		return nil, err
 	}
 	return p, nil
 }

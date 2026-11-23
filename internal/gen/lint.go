@@ -126,7 +126,7 @@ func (p *Project) Lint(o LintOptions) error {
 	errs, warns, infos := countFindings(out.Findings)
 	p.Out("checked %s: %d error(s), %d warning(s), %d info", scope, errs, warns, infos)
 	if !o.All && !useDB {
-		p.Out("(set DATABASE_URL to check pending migrations, or use --all)")
+		p.Out("(set DATABASE_URL in .env to check pending migrations, or use --all)")
 	}
 	if errs > 0 || (o.Strict && warns > 0) {
 		return errors.New("lint failed")
