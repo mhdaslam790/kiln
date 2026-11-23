@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit + SQLite (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.23.x", "stable"] # oldest supported and newest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: |
+            go.sum
+            integration/go.sum
+            cache/rediscache/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Redis store module
+        working-directory: cache/rediscache
+        run: go vet ./...
+      - name: SQLite end-to-end
+        working-directory: integration
+        run: go test -race ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: |
+            go.sum
+            integration/go.sum
+            cache/rediscache/go.sum
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - name: staticcheck
+        run: |
+          go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+          (cd cache/rediscache && go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...)
+          (cd integration && go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...)
+
+  databases:
+    name: PostgreSQL, MySQL, SQL Server, Redis
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: kiln
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: secret
+          MYSQL_DATABASE: kiln
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -psecret"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Secret_Passw0rd
+        ports: ["1433:1433"]
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Secret_Passw0rd -Q 'SELECT 1'"
+          --health-interval 10s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            integration/go.sum
+            cache/rediscache/go.sum
+      - name: Integration tests
+        working-directory: integration
+        env:
+          PG_DSN: postgres://postgres:secret@localhost:5432/kiln?sslmode=disable
+          MYSQL_DSN: root:secret@tcp(localhost:3306)/kiln?parseTime=true
+          MSSQL_DSN: sqlserver://sa:Secret_Passw0rd@localhost:1433?database=master
+          REDIS_ADDR: localhost:6379
+        run: go test -race -count=1 -p 1 -v ./...
+      - name: Integration tests with the prepared statement cache
+        working-directory: integration
+        env:
+          PG_DSN: postgres://postgres:secret@localhost:5432/kiln?sslmode=disable
+          MYSQL_DSN: root:secret@tcp(localhost:3306)/kiln?parseTime=true
+          MSSQL_DSN: sqlserver://sa:Secret_Passw0rd@localhost:1433?database=master
+          REDIS_ADDR: localhost:6379
+          KILN_TEST_STMT_CACHE: "1"
+        run: go test -race -count=1 -p 1 ./...

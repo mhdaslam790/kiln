@@ -1,0 +1,474 @@
+package gen
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/mhdaslam790/kiln/internal/meta"
+	"github.com/mhdaslam790/kiln/schema"
+)
+
+// modelInfo is a struct found in the models package.
+type modelInfo struct {
+	Name  string
+	Table string
+	File  string
+}
+
+// listModels finds model-like structs: exported structs with db tags, an
+// ID field, or a TableName method.
+func (p *Project) listModels() ([]modelInfo, error) {
+	dir := p.path(p.Config.Models)
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	structs := map[string]*modelInfo{}
+	likely := map[string]bool{}
+	tables := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range f.Decls {
+			switch d := d.(type) {
+			case *ast.GenDecl:
+				for _, s := range d.Specs {
+					ts, ok := s.(*ast.TypeSpec)
+					if !ok || !ts.Name.IsExported() || ts.TypeParams != nil {
+						continue
+					}
+					st, ok := ts.Type.(*ast.StructType)
+					if !ok {
+						continue
+					}
+					structs[ts.Name.Name] = &modelInfo{Name: ts.Name.Name, Table: meta.Plural(meta.Snake(ts.Name.Name)), File: path}
+					for _, fld := range st.Fields.List {
+						for _, n := range fld.Names {
+							if n.Name == "ID" {
+								likely[ts.Name.Name] = true
+							}
+						}
+						if fld.Tag != nil && strings.Contains(fld.Tag.Value, `db:"`) {
+							likely[ts.Name.Name] = true
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if d.Name.Name == "TableName" && d.Recv != nil && len(d.Recv.List) == 1 {
+					r := recvName(d.Recv.List[0].Type)
+					likely[r] = true
+					if t := returnedString(d); t != "" {
+						tables[r] = t
+					}
+				}
+			}
+		}
+	}
+	var out []modelInfo
+	for name, mi := range structs {
+		if !likely[name] {
+			continue
+		}
+		if t := tables[name]; t != "" {
+			mi.Table = t
+		}
+		out = append(out, *mi)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// runProgram writes a temporary main package inside the module, runs it
+// with go run and decodes its JSON output into v.
+func (p *Project) runProgram(src string, env []string, v any) error {
+	dir, err := os.MkdirTemp(p.Root, "kiln_tmp_")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	if err := p.writeGo(filepath.Join(dir, "main.go"), src, true); err != nil {
+		return err
+	}
+	cmd := exec.Command("go", "run", "./"+filepath.Base(dir))
+	cmd.Dir = p.Root
+	cmd.Env = append(os.Environ(), env...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := json.Unmarshal(stdout.Bytes(), v); err != nil {
+		return fmt.Errorf("unexpected output: %w\n%s", err, stdout.String())
+	}
+	return nil
+}
+
+func (p *Project) importPath(dir string) string {
+	return p.Module + "/" + filepath.ToSlash(strings.TrimPrefix(dir, "./"))
+}
+
+// DiffOptions configures Diff.
+type DiffOptions struct {
+	Name   string // migration name (default "auto")
+	DB     bool   // compare against the live database instead of the migrations
+	DSN    string
+	DryRun bool // print instead of writing a file
+}
+
+type diffOutput struct {
+	Up    []string `json:"up"`
+	Down  []string `json:"down"`
+	Notes []string `json:"notes"`
+	Error string   `json:"error"`
+}
+
+// Diff compares the models with the migrations (or the live database) and
+// writes a migration with the differences.
+func (p *Project) Diff(o DiffOptions) error {
+	models, err := p.listModels()
+	if err != nil {
+		return err
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("no models found in %s", p.Config.Models)
+	}
+	if err := p.ensureMigrationsPkg(); err != nil {
+		return err
+	}
+	var src strings.Builder
+	modPkg := lastSegment(p.Config.Models)
+	src.WriteString("package main\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"os\"\n\n")
+	fmt.Fprintf(&src, "\t%q\n\t%q\n\t%q\n", libPath+"/migrate", libPath+"/orm", libPath+"/dialect")
+	fmt.Fprintf(&src, "\tmigs %q\n\t%s %q\n", p.importPath(p.Config.Migrations), modPkg, p.importPath(p.Config.Models))
+	d := drivers[p.Config.Dialect]
+	if o.DB {
+		fmt.Fprintf(&src, "\t_ %q\n", d.Import)
+	}
+	src.WriteString(")\n\n")
+	src.WriteString("var _ = orm.Open\nvar _ = dialect.SQLite\nvar _ = context.Background\nvar _ = migs.Set\n\n")
+	src.WriteString("func main() {\n\tmodels := []any{\n")
+	for _, m := range models {
+		fmt.Fprintf(&src, "\t\t%s.%s{},\n", modPkg, m.Name)
+	}
+	src.WriteString("\t}\n\tvar res migrate.DiffResult\n\tvar err error\n")
+	if o.DB {
+		fmt.Fprintf(&src, `	ctx := context.Background()
+	db, err := orm.Connect(ctx, %q, os.Getenv("DATABASE_URL"), dialect.%s())
+	if err == nil {
+		defer db.Close()
+		state, ierr := migrate.Inspect(ctx, db)
+		if ierr != nil {
+			err = ierr
+		} else {
+			res, err = migrate.DiffFor(db.Dialect(), state, models...)
+		}
+	}
+`, d.Name, d.Dialect)
+	} else {
+		src.WriteString("\tres, err = migrate.DiffMigrations(migs.Set.List(), models...)\n")
+	}
+	src.WriteString(`	out := map[string]any{"up": migrate.RenderGo(res.Up), "down": migrate.RenderGo(res.Down), "notes": res.Notes}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	json.NewEncoder(os.Stdout).Encode(out)
+}
+`)
+	var env []string
+	if o.DSN != "" {
+		env = append(env, "DATABASE_URL="+o.DSN)
+	}
+	if o.DB && o.DSN == "" && os.Getenv("DATABASE_URL") == "" {
+		return errors.New("--db needs DATABASE_URL or --dsn")
+	}
+	var out diffOutput
+	if err := p.runProgram(src.String(), env, &out); err != nil {
+		return err
+	}
+	if out.Error != "" {
+		return errors.New(out.Error)
+	}
+	for _, n := range out.Notes {
+		p.Out("note: %s", n)
+	}
+	if len(out.Up) == 0 {
+		p.Out("schema is up to date with the models")
+		return nil
+	}
+	if o.DryRun {
+		p.Out("-- up\n%s\n-- down\n%s", strings.Join(out.Up, "\n"), strings.Join(out.Down, "\n"))
+		return nil
+	}
+	name := o.Name
+	if name == "" {
+		name = "auto"
+	}
+	_, err = p.writeMigration(name, out.Up, out.Down)
+	return err
+}
+
+// PullOptions configures Pull.
+type PullOptions struct {
+	DSN    string
+	Tables []string // only these tables (default: all without a model)
+	Force  bool     // overwrite existing model files
+}
+
+// Pull generates model structs from the live database for tables that do
+// not have a model yet.
+func (p *Project) Pull(o PullOptions) error {
+	d := drivers[p.Config.Dialect]
+	src := fmt.Sprintf(`package main
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+
+	_ %q
+
+	"%[2]s/dialect"
+	"%[2]s/migrate"
+	"%[2]s/orm"
+)
+
+func main() {
+	ctx := context.Background()
+	out := map[string]any{}
+	db, err := orm.Connect(ctx, %q, os.Getenv("DATABASE_URL"), dialect.%s())
+	if err == nil {
+		defer db.Close()
+		var st any
+		st, err = migrate.Inspect(ctx, db)
+		out["state"] = st
+	}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	json.NewEncoder(os.Stdout).Encode(out)
+}
+`, d.Import, libPath, d.Name, d.Dialect)
+	var env []string
+	if o.DSN != "" {
+		env = append(env, "DATABASE_URL="+o.DSN)
+	} else if os.Getenv("DATABASE_URL") == "" {
+		return errors.New("pull needs DATABASE_URL or --dsn")
+	}
+	var out struct {
+		State *schema.State `json:"state"`
+		Error string        `json:"error"`
+	}
+	if err := p.runProgram(src, env, &out); err != nil {
+		return err
+	}
+	if out.Error != "" {
+		return errors.New(out.Error)
+	}
+	existing, err := p.listModels()
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, m := range existing {
+		have[m.Table] = true
+	}
+	only := map[string]bool{}
+	for _, t := range o.Tables {
+		only[t] = true
+	}
+	n := 0
+	for _, name := range out.State.TableNames() {
+		if len(only) > 0 && !only[name] {
+			continue
+		}
+		if have[name] && !o.Force {
+			p.Out("skip %s (model exists)", name)
+			continue
+		}
+		t := out.State.Tables[name]
+		model := meta.Camel(meta.Singular(name))
+		path := p.path(p.Config.Models, meta.Snake(model)+".go")
+		if err := p.writeGo(path, modelFromTable(lastSegment(p.Config.Models), model, t), o.Force); err != nil {
+			return err
+		}
+		p.Out("created %s", p.rel(path))
+		n++
+	}
+	if n == 0 {
+		p.Out("no new models")
+	}
+	return nil
+}
+
+// modelFromTable renders a model struct for an inspected table.
+func modelFromTable(pkg, name string, t *schema.TableState) string {
+	imports := map[string]bool{}
+	pks := map[string]bool{}
+	for _, c := range t.PrimaryKey {
+		pks[c] = true
+	}
+	singlePK := len(t.PrimaryKey) == 0
+	fks := map[string]schema.ForeignKey{}
+	for _, fk := range t.ForeignKeys {
+		fks[fk.Columns[0]] = fk
+	}
+	// Index tags: single-column plain indexes use "index", others a named group.
+	idxTags := map[string][]string{}
+	for _, ix := range t.Indexes {
+		if ix.Unique && len(ix.Columns) == 1 {
+			continue // reported as Column.Unique
+		}
+		if len(ix.Columns) == 1 && !ix.Unique {
+			if _, isFK := fks[ix.Columns[0]]; isFK {
+				continue // implied by references
+			}
+			idxTags[ix.Columns[0]] = append(idxTags[ix.Columns[0]], "index")
+			continue
+		}
+		key := "index:"
+		if ix.Unique {
+			key = "uniqueindex:"
+		}
+		for _, c := range ix.Columns {
+			idxTags[c] = append(idxTags[c], key+ix.Name)
+		}
+	}
+
+	var b strings.Builder
+	var fields []string
+	for _, c := range t.Columns {
+		goType, st := goTypeFor(c, imports)
+		var dbOpts []string
+		if pks[c.Name] || (singlePK && c.Primary) {
+			dbOpts = append(dbOpts, "primary")
+			if c.Type != schema.ID && (c.Type == schema.Int || c.Type == schema.BigInt || c.Type == schema.SmallInt) && singlePK {
+				dbOpts = append(dbOpts, "noauto")
+			}
+		}
+		if c.Unique {
+			st = append(st, "unique")
+		}
+		if fk, ok := fks[c.Name]; ok {
+			ref := "references:" + fk.RefTable
+			if fk.RefColumns[0] != "id" {
+				ref += "." + fk.RefColumns[0]
+			}
+			st = append(st, ref)
+			if fk.OnDelete != "" {
+				st = append(st, "ondelete:"+fk.OnDelete)
+			}
+		}
+		st = append(st, idxTags[c.Name]...)
+		tag := `db:"` + strings.Join(append([]string{c.Name}, dbOpts...), ",") + `"`
+		if len(st) > 0 {
+			tag += ` schema:"` + strings.Join(st, ",") + `"`
+		}
+		fields = append(fields, fmt.Sprintf("\t%s %s `%s`\n", meta.Camel(c.Name), goType, tag))
+	}
+	fmt.Fprintf(&b, "package %s\n\n", pkg)
+	if len(imports) > 0 {
+		b.WriteString("import (\n")
+		var ims []string
+		for im := range imports {
+			ims = append(ims, im)
+		}
+		sort.Strings(ims)
+		for _, im := range ims {
+			b.WriteString("\t" + strconv.Quote(im) + "\n")
+		}
+		b.WriteString(")\n\n")
+	}
+	fmt.Fprintf(&b, "// %s maps table %s (generated by kiln pull).\ntype %s struct {\n", name, t.Name, name)
+	for _, f := range fields {
+		b.WriteString(f)
+	}
+	b.WriteString("}\n")
+	if meta.Plural(meta.Snake(name)) != t.Name {
+		fmt.Fprintf(&b, "\nfunc (%s) TableName() string { return %q }\n", name, t.Name)
+	}
+	return b.String()
+}
+
+// goTypeFor picks the Go type and the schema tag entries needed so that a
+// diff of the generated model against the database is empty.
+func goTypeFor(c schema.Column, imports map[string]bool) (string, []string) {
+	var t string
+	var st []string
+	ptr := !c.Required
+	switch c.Type {
+	case schema.ID, schema.BigInt:
+		t = "int64"
+	case schema.Int:
+		t = "int"
+	case schema.SmallInt:
+		t = "int16"
+	case schema.Bool:
+		t = "bool"
+	case schema.Float:
+		t = "float64"
+	case schema.Decimal:
+		t = "float64"
+		st = append(st, "type:decimal")
+		if c.Precision > 0 {
+			st = append(st, fmt.Sprintf("precision:%d", c.Precision), fmt.Sprintf("scale:%d", c.Scale))
+		}
+	case schema.String:
+		t = "string"
+		if c.Limit > 0 && c.Limit != 255 {
+			st = append(st, fmt.Sprintf("limit:%d", c.Limit))
+		}
+	case schema.Text, schema.UUID:
+		t = "string"
+		st = append(st, "type:"+string(c.Type))
+	case schema.Date, schema.Time:
+		t = "time.Time"
+		imports["time"] = true
+		st = append(st, "type:"+string(c.Type))
+	case schema.DateTime:
+		t = "time.Time"
+		imports["time"] = true
+	case schema.Bytes:
+		t, ptr = "[]byte", false
+		if c.Required {
+			st = append(st, "notnull")
+		}
+	case schema.JSON:
+		t, ptr = "json.RawMessage", false
+		imports["encoding/json"] = true
+		st = append(st, "type:json")
+		if c.Required {
+			st = append(st, "notnull")
+		}
+	default:
+		t = "string"
+		st = append(st, "type:text")
+	}
+	if c.SQLType != "" {
+		st = append(st, "sqltype:"+c.SQLType)
+	}
+	if ptr {
+		t = "*" + t
+	}
+	return t, st
+}

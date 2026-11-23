@@ -1,0 +1,22 @@
+# Binaries
+/kiln
+*.exe
+*.test
+*.out
+dist/
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Environment
+.env
+.env.*

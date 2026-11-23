@@ -1,0 +1,1179 @@
+# kiln
+
+A typed ORM, migration toolkit and code generator for Go, built on plain `database/sql`.
+It supports **PostgreSQL, MySQL/MariaDB, SQLite and SQL Server**.
+
+kiln started as a migration generator and grew into a full data layer inspired by
+[go-rel/rel](https://github.com/go-rel/rel). It adds generics, auto-generated migrations,
+cursor pagination and more ([comparison](#compared-with-other-go-libraries)).
+
+```go
+users := orm.For[User](db)
+
+u, err := users.FindByID(ctx, 1)
+page, err := users.Cursor(ctx, orm.CursorOpts{Limit: 20, Sort: "-created_at"}, q.Eq("active", true))
+err = db.Transaction(ctx, func(ctx context.Context) error {
+	return users.Insert(ctx, &User{Name: "Ada", Profile: &Profile{Bio: "..."}}, orm.Cascade())
+})
+```
+
+```bash
+kiln create Post title:string body:text user:references   # model + migration
+# ...edit models/post.go by hand...
+kiln diff add_post_slug                                    # migration written for you
+kiln migrate up
+```
+
+## Contents
+
+1. [Install](#install)
+2. [Getting started](#getting-started): a project from zero to a running query
+3. [How it works](#how-it-works)
+4. [CLI reference](#cli-reference)
+5. [Models](#models)
+6. [Querying](#querying)
+7. [Writing data](#writing-data)
+8. [Associations](#associations)
+9. [Transactions](#transactions)
+10. [Pagination](#pagination)
+11. [Hooks, scopes, logging, replicas](#hooks-scopes-logging-replicas)
+12. [Caching](#caching): query results (memory or Redis) and prepared statements
+13. [Migrations](#migrations)
+14. [Auto-generated migrations](#auto-generated-migrations)
+15. [Seeds](#seeds)
+16. [Testing your code](#testing-your-code)
+17. [Database notes](#database-notes)
+18. [Troubleshooting](#troubleshooting)
+19. [Compared with other Go libraries](#compared-with-other-go-libraries)
+20. [Performance](#performance)
+21. [Developing kiln](#developing-kiln)
+22. [License](#license)
+
+---
+
+## Install
+
+Install the CLI and add the library to your module:
+
+```bash
+go install github.com/mhdaslam790/kiln@latest   # the `kiln` command
+go get github.com/mhdaslam790/kiln@latest       # the library, inside your module
+```
+
+The library has **no driver dependencies**, so install the driver for your database yourself:
+
+| Database | Driver (`go get`) | `sql.Open` name | Example DSN |
+|---|---|---|---|
+| PostgreSQL | `github.com/jackc/pgx/v5/stdlib` | `pgx` | `postgres://user:pass@localhost:5432/app?sslmode=disable` |
+| MySQL / MariaDB | `github.com/go-sql-driver/mysql` | `mysql` | `user:pass@tcp(localhost:3306)/app?parseTime=true` |
+| SQLite (3.35+) | `modernc.org/sqlite` | `sqlite` | `file:app.db?_pragma=foreign_keys(1)` |
+| SQL Server | `github.com/microsoft/go-mssqldb` | `sqlserver` | `sqlserver://sa:pass@localhost:1433?database=app` |
+
+> MySQL needs `parseTime=true` so that `DATETIME` columns scan into `time.Time`.
+> SQLite needs `foreign_keys(1)` for foreign keys to be enforced.
+
+---
+
+## Getting started
+
+This walkthrough uses PostgreSQL. To use another database, pass a different `--dialect` and
+use that database's DSN from the table above.
+
+### 1. Initialise the project
+
+Run this inside a Go module (a directory with a `go.mod`):
+
+```bash
+kiln init --dialect postgres
+go get github.com/jackc/pgx/v5/stdlib
+```
+
+This creates:
+
+```
+kiln.json                # configuration (see below)
+db/migrations/migrations.go  # `var Set migrate.Set`: every migration registers here
+db/seeds/seeds.go            # `var Set seed.Set`: every seeder registers here
+cmd/migrate/main.go          # a small program that runs migrations and seeds; edit it freely
+```
+
+`kiln.json`:
+
+```json
+{
+  "dialect": "postgres",
+  "migrations": "db/migrations",
+  "models": "models",
+  "runner": "cmd/migrate",
+  "seeds": "db/seeds"
+}
+```
+
+### 2. Generate models and migrations
+
+```bash
+kiln create User name:string email:string:unique bio:text:null --soft-delete
+kiln create Post title:string:limit=200 body:text user:references published:bool:index
+```
+
+Each `create` writes a model and a migration:
+
+```go
+// models/post.go
+type Post struct {
+	ID        int64     `db:"id,primary"`
+	Title     string    `db:"title" schema:"limit:200"`
+	Body      string    `db:"body" schema:"type:text"`
+	UserID    int64     `db:"user_id" schema:"references:users"`
+	Published bool      `db:"published" schema:"index"`
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
+}
+
+// db/migrations/20261123120000_create_posts.go
+func init() {
+	Set.Add(20261123120000, "create_posts",
+		func(s *schema.Schema) {
+			s.CreateTable("posts", func(t *schema.Table) {
+				t.ID("id")
+				t.String("title", schema.Required(), schema.Limit(200))
+				t.Text("body", schema.Required())
+				t.References("user_id", "users", schema.Required())
+				t.Bool("published", schema.Required())
+				t.Index([]string{"published"})
+				t.Timestamps()
+			})
+		},
+		func(s *schema.Schema) { s.DropTable("posts") },
+	)
+}
+```
+
+Migrations are plain Go files, so you can edit them, review them, and keep them in version control.
+
+### 3. Run the migrations
+
+```bash
+export DATABASE_URL="postgres://user:pass@localhost:5432/app?sslmode=disable"
+kiln migrate sql      # preview the SQL (dry run)
+kiln migrate up       # apply
+kiln migrate status   # see what is applied
+```
+
+`kiln migrate` runs `go run ./cmd/migrate`. In production, build that program into a
+binary and run it directly, with no CLI needed:
+
+```bash
+go build -o bin/migrate ./cmd/migrate
+DATABASE_URL=... ./bin/migrate up
+```
+
+### 4. Use the ORM in your application
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/mhdaslam790/kiln/dialect"
+	"github.com/mhdaslam790/kiln/orm"
+	"github.com/mhdaslam790/kiln/q"
+
+	"example.com/app/models"
+)
+
+func main() {
+	ctx := context.Background()
+	db, err := orm.Connect(ctx, "pgx", os.Getenv("DATABASE_URL"), dialect.Postgres())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	users := orm.For[models.User](db)
+	u := models.User{Name: "Ada", Email: "ada@example.com"}
+	if err := users.Insert(ctx, &u); err != nil { // fills u.ID, CreatedAt, UpdatedAt
+		log.Fatal(err)
+	}
+
+	posts := orm.For[models.Post](db)
+	latest, err := posts.FindAll(ctx, q.Eq("user_id", u.ID), q.Sort("-created_at"), q.Limit(10))
+	log.Println(latest, err)
+}
+```
+
+If you already have a `*sql.DB`, use `orm.Open(sqlDB, dialect.Postgres())`.
+
+### 5. Change the schema later
+
+You have two ways to do it, and they can be mixed:
+
+```bash
+# A. Ask for a specific change
+kiln add-column User avatar_url:string:null
+kiln add-index Post title
+
+# B. Edit the model structs yourself, then generate the migration from the difference
+kiln diff add_slugs
+kiln migrate up
+```
+
+---
+
+## How it works
+
+```
+             ┌──────────────────────────── your module ───────────────────────────┐
+             │                                                                    │
+ kiln        │  models/*.go             db/migrations/*.go          db/seeds/*.go │
+ CLI writes  │  (structs + tags)        (schema DSL in Go)          (Go funcs)    │
+ and edits   │      │    │                     │                           │      │
+ these files │      │    └────── kiln diff ───┤ replays migrations in      │      │
+             │      │          (or --db:      │ memory, compares with      │      │
+             │      │           inspects DB)  │ the models, writes a new   │      │
+             │      ▼                         ▼ migration file             │      │
+             │  orm.For[T]               migrate.Migrator  ◄───────────────┘      │
+             │  (cached reflection)      (version table + lock)                   │
+             │      │                         │                                   │
+             │      ▼                         ▼                                   │
+             │  q.Query (AST)            schema.Op (AST)                          │
+             └──────┼─────────────────────────┼───────────────────────────────────┘
+                    ▼                         ▼
+          dialect: PostgreSQL │ MySQL │ SQLite │ SQL Server  →  SQL text + args
+                    ▼
+          database/sql + the driver you chose
+```
+
+**Packages**
+
+| Package | Role |
+|---|---|
+| `q` | Immutable query AST: filters, sorting, joins, grouping, locking, mutations. It contains no SQL strings. |
+| `schema` | Migration DSL. Each call records an `Op` (CreateTable, AddColumn, ...). `schema.State` replays Ops in memory. |
+| `dialect` | Compiles `q.Query` and `schema.Op` into SQL for one database: quoting, placeholders (`$1`, `?`, `@p1`), `RETURNING`/`OUTPUT`, `LIMIT`/`TOP`/`OFFSET FETCH`, upserts and DDL. It also classifies constraint errors. |
+| `orm` | Runs queries. `DB` wraps `*sql.DB`, and `Repo[T]` is the typed API. It handles reflection metadata, scanning, hooks, timestamps, soft delete, preload, cascade, change tracking and replicas. |
+| `migrate` | Versioned runner (`schema_migrations` table + lock), diff engine, database inspection and Go code rendering. |
+| `seed` | Ordered, named seeders, each run in a transaction. |
+| `cache` | Storage for the query result cache: the `Store` interface and the in-memory LRU. Redis lives in the separate module `cache/rediscache`. |
+| `ormtest` | In-memory mocks of `orm.Repository[T]`. |
+
+**Key mechanisms**
+
+- **Model metadata.** On first use, each struct type is reflected once and cached. This finds
+  the table name, columns, primary key(s), timestamp fields, soft-delete field, JSON fields
+  and associations. Everything after that works from the cache.
+- **Transactions travel in `context.Context`.** `db.Transaction(ctx, fn)` puts the `*sql.Tx`
+  into the ctx it passes to `fn`. Every repo call made with that ctx joins the transaction, so
+  your service functions don't need a `tx` parameter. A nested `Transaction` becomes a
+  `SAVEPOINT`.
+- **Writes.** Insert sets timestamps, runs `BeforeInsert`, compiles the INSERT for the
+  dialect, and reads the generated key back (`RETURNING` on PostgreSQL/SQLite, `OUTPUT INSERTED`
+  on SQL Server, `LastInsertId` on MySQL). It then runs `AfterInsert`. If an After-hook fails,
+  the write is rolled back.
+- **Preload** loads associations with one `IN (...)` query per level, never one query per row.
+- **Migrations.** The runner takes a database-wide lock, so two app instances starting at once
+  don't both migrate (PostgreSQL advisory lock, MySQL `GET_LOCK`, SQL Server
+  `sp_getapplock`). It then applies each pending migration and its `schema_migrations` row in
+  one transaction. On SQLite, operations that `ALTER TABLE` cannot do are performed by the
+  official rebuild procedure (copy into a new table, swap, re-index, check foreign keys).
+- **Diffing.** `kiln diff` builds the *current* schema by replaying your migrations into a
+  `schema.State` in memory, with no database needed. It builds the *wanted* schema from your
+  model structs and `schema` tags, then compares them. With `--db`, the current schema
+  is read from the live database instead (`information_schema`, `pg_catalog`, `PRAGMA`, `sys.*`).
+  The result is rendered as DSL Go code into a new migration file. The CLI runs this inside
+  your module through a temporary `go run` program, because it has to import your models.
+
+---
+
+## CLI reference
+
+Run commands from anywhere inside your module. Paths come from `kiln.json`.
+
+| Command | What it does |
+|---|---|
+| `kiln init [-d dialect] [--migrations dir] [--models dir] [--runner dir] [--seeds dir] [--force]` | Create the config, the migrations and seeds packages, and the runner. With `--force`, it re-runs and regenerates the runner, keeping config values for flags you omit. |
+| `kiln create <Model> field:type... [--soft-delete] [--no-timestamps] [--table name]` | New model + create-table migration |
+| `kiln add-column <Model> field:type...` | Add fields to the model + migration |
+| `kiln drop-column <Model> column...` | Remove fields + migration. The Down restores the columns. |
+| `kiln rename-column <Model> old new` | Rename a field/column + migration |
+| `kiln add-index <Model\|table> column... [-u]` | Index (or unique index) migration |
+| `kiln drop-index <Model\|table> column... [-u]` | Drop-index migration |
+| `kiln new <name>` | Empty migration for hand-written changes or data migrations |
+| `kiln diff [name] [--dry-run] [--db] [--dsn url]` | Migration from model changes ([details](#auto-generated-migrations)) |
+| `kiln pull [table...] [--force] [--dsn url]` | Generate models from an existing database |
+| `kiln gen [--check]` | Typed columns for every model (`models/kiln_cols.go`) ([details](#typed-columns-compile-time-checked)) |
+| `kiln migrate [up \| down [n] \| redo \| status \| sql] [--dsn url]` | Run migrations |
+| `kiln new-seed <name>` | New seeder file |
+| `kiln seed [name...] [--dsn url]` | Run all seeders, or only the named ones |
+
+The database URL comes from `DATABASE_URL`, or from `--dsn` when you pass it.
+
+### Field syntax
+
+`name:type[:modifier...]`, e.g. `email:string:unique:limit=120`, `score:int:default=5`,
+`author:references:to=users`.
+
+| Types | |
+|---|---|
+| `string` (VARCHAR 255) `text` `int` `bigint` `float` `decimal` `bool` `datetime` `date` `time` `bytes` `json` `uuid` | Column types |
+| `references` | `author:references` becomes `author_id BIGINT` + a foreign key to `authors(id)` + an index |
+
+| Modifiers | |
+|---|---|
+| `null` | Allow NULL. The Go field becomes a pointer. Columns are `NOT NULL` by default. |
+| `unique`, `index` | Unique constraint / plain index |
+| `required` | Keep NOT NULL even without a default (see `add-column` below) |
+| `limit=N`, `precision=P`, `scale=S` | Size of string / decimal |
+| `default=V` | Column default |
+| `to=table` | Referenced table for `references` |
+
+`add-column` makes migrations safe on tables that already contain rows. `NOT NULL` columns
+get a zero-value default (`''`, `0`, `false`). New `references` columns are nullable, because
+`0` would break the foreign key.
+
+---
+
+## Models
+
+A model is a plain struct. Conventions cover most cases, and tags handle the rest.
+
+```go
+type User struct {
+	ID        int64                          // "ID" is the primary key, auto-increment
+	Name      string                         // column "name"
+	Email     string         `db:"email"`
+	Bio       *string                        // pointer = nullable
+	Prefs     map[string]any `db:"prefs,json"` // stored as JSON
+	CreatedAt time.Time                      // set on insert
+	UpdatedAt time.Time                      // set on insert and update
+	DeletedAt *time.Time                     // enables soft delete
+
+	Posts   []Post   // has many   (posts.user_id → users.id)
+	Profile *Profile // has one    (profiles.user_id → users.id)
+}
+
+type Post struct {
+	ID     int64
+	UserID int64
+	User   *User // belongs to  (posts.user_id → users.id)
+	Title  string
+}
+```
+
+| Rule | |
+|---|---|
+| Table name | snake_case plural of the type (`BlogPost` → `blog_posts`), or a `TableName() string` method |
+| Column name | snake_case of the field (`AvatarURL` → `avatar_url`), or `db:"name"` |
+| Primary key | the `ID` field, or fields tagged `primary`. Several `primary` fields make a composite key. |
+| `db` tag options | `primary`, `auto` / `noauto` (auto-increment), `json`, `readonly`, `omitempty`; `db:"-"` skips the field |
+| Associations | detected from struct/slice fields; override the keys with `ref:"owner_col" fk:"target_col"` |
+| Embedding | embedded structs are flattened, so a shared `Base{ID, CreatedAt, UpdatedAt}` works |
+
+The `schema:"..."` tag only matters to `kiln diff`/`pull` (see
+[Auto-generated migrations](#auto-generated-migrations)). The ORM ignores it at runtime.
+
+---
+
+## Querying
+
+```go
+db := orm.Open(sqlDB, dialect.Postgres())
+users := orm.For[User](db)
+
+u, err := users.FindByID(ctx, 1)                      // orm.ErrNotFound if missing
+u, err  = users.Find(ctx, q.Eq("email", "a@b.c"))     // first match
+list, err := users.FindAll(ctx,
+	q.Eq("active", true),
+	q.Or(q.Gt("age", 18), q.Null("age")),
+	q.Like("email", "%@corp.com"),
+	q.Sort("-created_at", "id"), q.Limit(20), q.Offset(40))
+n, err  := users.Count(ctx, q.In("role", "admin", "owner"))
+ok, err := users.Exists(ctx, q.Eq("email", e))
+
+if errors.Is(err, orm.ErrNotFound) { ... }
+```
+
+**Filters**: `Eq Ne Lt Lte Gt Gte Like NotLike Null NotNull In NotIn InOf Between`,
+combined with `And Or Not`, plus `Expr("lower(email) = ?", e)` for raw SQL fragments.
+**Modifiers**: `Sort("-col")` (`-` means descending), `Limit`, `Offset`, `Page(page, size)`,
+`Select(cols...)`, `Distinct()`, `Group`, `Having`, `Join`, `LeftJoinOn`, `ForUpdate()`
+(row lock), `Unscoped()` (include soft-deleted rows).
+
+Write `?` placeholders in `Expr` and raw SQL. They are converted to `$1`/`@p1` per dialect
+(`??` gives a literal `?`).
+
+**Arbitrary queries** go into any struct or scalar:
+
+```go
+var stats []struct {
+	UserID int64 `db:"user_id"`
+	N      int   `db:"n"`
+}
+err = db.Select(ctx, &stats, q.From("posts").
+	Select("user_id", "COUNT(*) AS n").
+	Where(q.In("user_id", q.From("users").Select("id").Where(q.Eq("active", true)))). // sub-query
+	Group("user_id").
+	Having(q.Gt("COUNT(*)", 5)))
+
+var names []string
+err = db.Query(ctx, &names, "SELECT name FROM users WHERE age > ?", 30)   // raw SQL
+_, err = db.Exec(ctx, "UPDATE counters SET n = n + 1 WHERE id = ?", 1)
+```
+
+### Typed columns (compile-time checked)
+
+Column names as strings (`q.Eq("emial", x)`) compile even when misspelled. Run
+`kiln gen` once to get typed columns instead. The compiler then checks both the
+**column name** and the **value type**:
+
+```bash
+kiln gen        # writes models/kiln_cols.go
+```
+
+```go
+c := models.UserCols
+
+adults, err := users.FindAll(ctx, c.Age.Gte(18), c.Status.Eq("active"), c.CreatedAt.Desc())
+u, err := users.Find(ctx, c.Email.Eq("ann@x.io"))
+n, err := users.UpdateAny(ctx, c.Email.In("a@x.io", "b@x.io"), c.Status.Set("active"), c.Age.Inc(1))
+err = db.Select(ctx, &names, users.Query(q.Select(q.Names(c.Name)...), c.Name.Asc()))
+
+users.Find(ctx, c.Emial.Eq("x"))   // compile error: type models.userCols has no field or method Emial
+users.Find(ctx, c.Age.Eq("ten"))   // compile error: cannot use "ten" as int value
+```
+
+The generated file looks like this. Your own types (`Status`) and imported types
+(`time.Time`, `uuid.UUID`) are kept:
+
+```go
+// Code generated by kiln gen. DO NOT EDIT.
+var UserCols = userCols{ID: "id", Email: "email", Age: "age", Bio: "bio", Status: "status", ...}
+
+type userCols struct {
+	ID     q.Col[int64]
+	Email  q.Col[string]
+	Age    q.Col[int]
+	Bio    q.Col[string] // nullable: a *string field; use Bio.IsNull() / NotNull()
+	Status q.Col[Status]
+	...
+}
+```
+
+Every `q.Col[T]` has `Eq Ne Lt Lte Gt Gte Between In NotIn InQuery Like NotLike IsNull NotNull`,
+`EqCol` (compare two columns), `Asc`/`Desc`, `Set`/`SetNull`/`Inc` for `UpdateAny`, and `Of("u")`
+to qualify it for joins (`u.email`).
+
+Keeping the file current:
+
+- `kiln create`, `add-column`, `drop-column` and `rename-column` refresh it automatically once it
+  exists.
+- After editing structs by hand, run `kiln gen` again, or add `//go:generate kiln gen` to a
+  models file.
+- In CI, `kiln gen --check` fails when the file is stale.
+
+String columns keep working everywhere, so you can switch gradually. `orm.Describe(User{})` returns
+the same table and column information at runtime, which is useful for admin screens or exports.
+
+---
+
+## Writing data
+
+```go
+err = users.Insert(ctx, &u)                // fills u.ID, CreatedAt, UpdatedAt
+err = users.InsertAll(ctx, batch)          // one multi-row INSERT; IDs filled in place
+err = users.Update(ctx, &u)                // all columns
+err = users.Update(ctx, &u, "Name")        // only these fields (+ updated_at)
+err = users.Save(ctx, &u)                  // insert if new, update otherwise
+err = users.Delete(ctx, &u)                // soft delete if the model has DeletedAt
+err = users.Restore(ctx, &u)               // undo a soft delete
+err = users.HardDelete(ctx, &u)            // real DELETE
+
+// Set-based writes
+n, err := users.UpdateAny(ctx, q.Lt("last_seen", cutoff), q.Set("active", false), q.Inc("logins", 1))
+n, err  = users.DeleteAny(ctx, q.Eq("spam", true))
+
+// Upserts (PostgreSQL, MySQL, SQLite)
+users.Insert(ctx, &u, orm.OnConflictUpdate([]string{"email"}, "name")) // update name on conflict
+users.Insert(ctx, &u, orm.OnConflictDoNothing("email"))
+
+// Portable constraint errors
+if orm.IsUniqueViolation(err) { ... }
+if orm.IsForeignKeyViolation(err) { ... }
+```
+
+### Update only what changed
+
+```go
+cs := orm.Track(&u)              // take a snapshot
+u.Name = "New name"
+cs.Changed()                     // []string{"Name"}
+users.UpdateChanged(ctx, &u, cs) // UPDATE users SET name = $1, updated_at = $2 WHERE id = $3
+```
+
+Without changes, `UpdateChanged` sends no query at all. After a successful update, the
+snapshot is reset.
+
+### Composite primary keys
+
+```go
+type PostTag struct {
+	PostID int64  `db:"post_id,primary"`
+	Tag    string `db:"tag,primary"`
+	Weight int
+}
+tags := orm.For[PostTag](db)
+pt, err := tags.FindByPK(ctx, postID, "go") // keys in field order
+```
+
+### Cascade insert
+
+```go
+u := User{
+	Name:    "Ada",
+	Profile: &Profile{Bio: "..."},                        // has one
+	Posts:   []Post{{Title: "first"}, {Title: "second"}}, // has many
+}
+err := users.Insert(ctx, &u, orm.Cascade()) // one transaction; foreign keys set for you
+```
+
+Belongs-to parents are inserted first, then the record, then its children. Records that
+already have a primary key are linked, not re-inserted.
+
+---
+
+## Associations
+
+Associations are loaded on demand:
+
+```go
+users.Preload(ctx, &u, "Posts", "Profile")
+users.PreloadAll(ctx, list, "Posts.Comments")                       // nested: one query per level
+db.Preload(ctx, &u, "Posts", q.Eq("published", true), q.Sort("-id")) // filtered
+```
+
+### Many-to-many
+
+Declare the join table with an `m2m` tag:
+
+```go
+type User struct {
+	ID    int64
+	Roles []Role `m2m:"user_roles"` // join columns user_id, role_id
+}
+
+type Article struct {
+	ID      int64
+	Related []Article `m2m:"related_articles,article_id,related_id"` // explicit columns (required for self-references)
+}
+```
+
+```go
+users.Preload(ctx, &u, "Roles")                         // join table, then roles: two queries
+db.Preload(ctx, &list, "Roles", q.Sort("name"))         // filters/sorting apply to the roles
+
+users.Link(ctx, &u, "Roles", &admin, &editor)           // add join rows; existing links are kept
+users.Link(ctx, &u, "Roles", roleID)                    // bare keys work too
+users.Unlink(ctx, &u, "Roles", &admin)                  // remove one link
+users.Unlink(ctx, &u, "Roles")                          // remove all of u's links
+
+users.Insert(ctx, &User{Roles: []Role{{Name: "new"}, existing}}, orm.Cascade()) // inserts new roles, links all
+```
+
+The join table is a normal table that you create in a migration:
+
+```go
+s.CreateTable("user_roles", func(t *schema.Table) {
+	t.References("user_id", "users", schema.Required(), schema.OnDelete("CASCADE"))
+	t.References("role_id", "roles", schema.Required(), schema.OnDelete("CASCADE"))
+	t.PrimaryKey("user_id", "role_id")
+})
+```
+
+---
+
+## Transactions
+
+```go
+err := db.Transaction(ctx, func(ctx context.Context) error {
+	if err := users.Insert(ctx, &u); err != nil {
+		return err // any error rolls back (a panic does too)
+	}
+	// Nested: a SAVEPOINT; only this block rolls back if it fails.
+	_ = db.Transaction(ctx, func(ctx context.Context) error { ... })
+	return posts.Insert(ctx, &p)
+})
+
+db.TransactionOpts(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, fn)
+u, err := users.Find(ctx, q.Eq("id", 1), q.ForUpdate()) // SELECT ... FOR UPDATE, inside a tx
+```
+
+Always use the `ctx` passed into `fn`. That ctx carries the transaction.
+
+---
+
+## Pagination
+
+### Offset pages (with totals)
+
+```go
+page, err := users.Paginate(ctx, 2, 25, q.Sort("name"))
+// page.Items, page.Total, page.Page, page.PerPage, page.TotalPages
+```
+
+Use this when you need page numbers. Every call runs a `COUNT(*)`, and deep pages get slower.
+
+### Cursor pages (keyset)
+
+```go
+opts := orm.CursorOpts{Limit: 20, Sort: "-created_at"}
+page, err := users.Cursor(ctx, opts, q.Eq("active", true))
+// page.Items, page.HasNext, page.HasPrev, page.Next, page.Prev (opaque strings)
+
+opts.After = page.Next                  // following page
+next, err := users.Cursor(ctx, opts, q.Eq("active", true))
+
+opts.After, opts.Before = "", next.Prev // and back again
+prev, err := users.Cursor(ctx, opts, q.Eq("active", true))
+```
+
+Each page continues from the last row it saw
+(`WHERE created_at < ? OR (created_at = ? AND id < ?)`) instead of using `OFFSET`. Page
+10,000 is as fast as page 1, and rows aren't skipped or repeated when data changes between
+requests. Ties on the sort column are broken by the primary key. Pass cursors to clients as
+is. A modified cursor returns `orm.ErrBadCursor`. Index the sort column for best performance.
+
+### Batches
+
+```go
+err := users.Each(ctx, 1000, func(u User) error { ...; return nil }, q.Eq("active", true))
+```
+
+`Each` streams a whole table in primary-key batches with constant memory.
+
+---
+
+## Hooks, scopes, logging, replicas
+
+**Hooks**: implement any of these on the model's pointer type:
+
+```go
+func (u *User) BeforeInsert(ctx context.Context) error { u.Email = strings.ToLower(u.Email); return nil }
+// BeforeInsert AfterInsert BeforeUpdate AfterUpdate BeforeDelete AfterDelete AfterFind
+```
+
+Returning an error aborts the operation. A failing `After*` hook rolls the write back.
+
+**Scopes**: a repo with permanent filters, which is useful for multi-tenancy:
+
+```go
+orders := orm.For[Order](db).Scope(q.Eq("tenant_id", tenantID))
+list, _ := orders.FindAll(ctx)                                         // always WHERE tenant_id = ...
+orders.UpdateAny(ctx, q.Eq("status", "new"), q.Set("status", "seen")) // scoped too
+```
+
+**Options for `orm.Open` / `orm.Connect`:**
+
+```go
+db := orm.Open(primary, dialect.Postgres(),
+	orm.WithLogger(slog.Default(), 200*time.Millisecond), // log queries; warn when slower than 200ms
+	orm.WithHook(func(ctx context.Context, e orm.Event) { // metrics/tracing: e.SQL, e.Args, e.Duration, e.Err
+		queryDuration.Observe(e.Duration.Seconds())
+	}),
+	orm.WithReplicas(replica1, replica2), // reads round-robin over replicas
+)
+
+u, err := users.Find(orm.UsePrimary(ctx), q.Eq("id", id)) // read your own write from the primary
+
+db.WithConn(ctx, func(ctx context.Context) error { // pin one connection (SET, temp tables, ...)
+	...
+})
+```
+
+With replicas, reads go to replicas and writes go to the primary. Anything inside a
+transaction uses the primary.
+
+---
+
+## Caching
+
+kiln has two caches. **Both are off by default**. You turn each one on when you open
+the database.
+
+| | Prepared statement cache | Query result cache |
+|---|---|---|
+| Turn on | `orm.WithStmtCache(64)` | `orm.WithCache(...)` **and** `orm.Cached(ctx, ttl)` per query |
+| What it saves | The database parsing and planning the same SQL again | The whole trip to the database |
+| Results | Always fresh | Served from the cache until a write or the TTL invalidates them |
+| Helps most | MySQL / MariaDB (one round trip instead of three) | Hot, repeated reads: lookups, lists, counts |
+
+### Query result cache
+
+**1. Turn it on** when connecting. The in-memory store is the default:
+
+```go
+db, err := orm.Connect(ctx, "pgx", dsn, dialect.Postgres(),
+	orm.WithCache(), // in-memory LRU: 10,000 entries / 64 MiB
+)
+```
+
+Or choose and tune the store:
+
+```go
+import "github.com/mhdaslam790/kiln/cache"
+
+orm.WithCache(
+	orm.CacheStore(cache.NewMemory(cache.MaxEntries(50_000), cache.MaxBytes(256<<20))),
+	orm.CacheTTL(5*time.Minute), // default expiry (1 minute if not set)
+)
+```
+
+To share the cache between several app instances, use **Redis**:
+
+```sh
+go get github.com/mhdaslam790/kiln/cache/rediscache github.com/redis/go-redis/v9
+```
+
+```go
+import (
+	"github.com/redis/go-redis/v9"
+	"github.com/mhdaslam790/kiln/cache/rediscache"
+)
+
+rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+db, err := orm.Connect(ctx, "pgx", dsn, dialect.Postgres(),
+	orm.WithCache(
+		orm.CacheStore(rediscache.New(rdb)), // single node, sentinel or cluster client
+		orm.CachePrefix("myapp:"),           // namespace keys (default "kiln:")
+		orm.CacheOnError(func(ctx context.Context, err error) { log.Println("cache:", err) }),
+	))
+```
+
+**2. Mark the reads you want cached** with `orm.Cached`. Reads without it always go to
+the database:
+
+```go
+ctx := orm.Cached(ctx, 10*time.Minute) // 0 = the default TTL
+
+u, err := users.FindByID(ctx, 42)                     // cached
+list, err := users.FindAll(ctx, q.Eq("active", true)) // cached separately (other SQL/args)
+n, err := users.Count(ctx)
+page, err := users.Paginate(ctx, 1, 20)
+err = users.Preload(ctx, &u, "Posts")                 // preloads are cached too
+
+u, err = users.FindByID(orm.NoCache(ctx), 42)         // skip the cache for this call
+```
+
+The same flag works for `Find`, `FindAll`, `FindByID`, `Count`, `Exists`, `Paginate`,
+`Preload`, `Select` and `Query`.
+
+**How invalidation works.** Each cached entry records which tables it read: the main
+table, joined tables and sub-query tables. Every table has a version. Any write through
+the ORM gives the table a new version, which makes every entry that read it stale. This
+covers `Insert`, `InsertAll`, `Update`, `Save`, `Delete`, `Restore`, `UpdateAny`,
+`DeleteAny`, `Link`, `Unlink` and cascades. So after
+`users.Update(ctx, &u)`, the next cached read of `users` goes to the database. Cached
+`posts` queries stay valid.
+
+- **Transactions:** reads inside `db.Transaction` always go to the database. Writes
+  invalidate only **after commit**, so other requests never cache rows that might still
+  be rolled back. A rollback invalidates nothing.
+- **Writes the ORM can't see:** raw `db.Exec`, other services and manual SQL. Call
+  `db.InvalidateTables(ctx, "users")`, or rely on the TTL.
+- **Raw SQL reads** are cached only when you name their tables:
+  `db.Query(orm.Cached(ctx, 0, "users", "orders"), &rows, "SELECT ...")`. Name extra
+  tables in the same way when a `q.Expr` fragment reads another table.
+- **Many identical misses at once** share a single database query.
+- **Store failures never fail a query.** If Redis is down, reads fall back to the
+  database and `CacheOnError` is called.
+- **Hooks see cache hits:** `orm.Event.Cached` is true, and `WithLogger` logs `cached=true`.
+
+> **Memory or Redis?** The memory store is the fastest (about 4–7 µs per hit), but each
+> app instance has its own copy. A write on instance A does not clear instance B's
+> entries; they become correct once their TTL expires. Running more than one instance?
+> Use Redis, or keep TTLs short.
+
+> **After migrations or deploys** that change columns, Redis may still hold results in the
+> old shape until they expire. Change `CachePrefix` (for example, include your schema
+> version), or flush the prefix.
+
+Values that can't be cached safely are simply not cached. That covers query arguments
+that are pointers or structs, and driver values other than integers, floats, booleans,
+strings, bytes, times and NULL. The query still runs normally.
+
+### Prepared statement cache
+
+```go
+db, err := orm.Connect(ctx, "mysql", dsn, dialect.MySQL(), orm.WithStmtCache(64))
+```
+
+This keeps up to 64 prepared statements per connection pool and reuses them. Nothing
+else changes, and results are never cached.
+
+- It is used on the pool only. Inside transactions and `WithConn` blocks, statements run
+  as usual.
+- Raw SQL containing `;` is never prepared.
+- If a statement fails after a schema change, it is dropped and prepared again next time.
+- Each connection keeps its own copy of a statement, so keep the size modest. MySQL limits
+  prepared statements server-wide (`max_prepared_stmt_count`).
+- PostgreSQL's `pgx` driver already caches statements itself, so expect little gain there.
+
+---
+
+## Migrations
+
+A migration is an `Up` and a `Down` function that record operations with the DSL:
+
+```go
+func init() {
+	Set.Add(20261123120000, "create_orders",
+		func(s *schema.Schema) {
+			s.CreateTable("orders", func(t *schema.Table) {
+				t.ID("id")
+				t.References("user_id", "users", schema.Required(), schema.OnDelete("CASCADE"))
+				t.String("status", schema.Required(), schema.Limit(20), schema.Default("new"))
+				t.Decimal("total", schema.Precision(10), schema.Scale(2))
+				t.JSON("meta")
+				t.Timestamps()
+				t.SoftDelete()
+				t.Unique("user_id", "status")
+			})
+			s.CreateIndex("orders", "", []string{"created_at"}, schema.PartialWhere("deleted_at IS NULL"))
+
+			// Data migration in Go, in the same transaction
+			s.Do(func(ctx context.Context, tx schema.Executor) error {
+				_, err := tx.ExecContext(ctx, "UPDATE users SET plan = 'free' WHERE plan IS NULL")
+				return err
+			})
+		},
+		func(s *schema.Schema) { s.DropTable("orders") },
+	)
+}
+```
+
+| Operations | |
+|---|---|
+| Tables | `CreateTable`, `CreateTableIfNotExists`, `AlterTable`, `RenameTable`, `DropTable`, `DropTableIfExists` |
+| Columns | `AddColumn`, `ChangeColumn`, `RenameColumn`, `DropColumn` |
+| Indexes / keys | `CreateIndex`, `CreateUniqueIndex`, `DropIndex`, `DropIndexIfExists`, `AddForeignKey`, `DropForeignKey` |
+| Escape hatches | `Exec(sql, args...)`, `Do(func)` |
+
+Column types: `ID String Text SmallInt Int BigInt Float Decimal Bool DateTime Date Time
+Bytes JSON UUID`. Column options: `Required Unique Limit Precision Scale Default Primary
+Unsigned`, plus `SQLType("CITEXT")` for a database-specific type. Index options:
+`UniqueIndex`, `PartialWhere`, `IndexIfNotExists`. Foreign key options: `OnDelete`,
+`OnUpdate`, `FKName`.
+
+**Runner behaviour**
+
+- Versions are timestamps, and migrations apply in version order.
+- Each migration runs in its own transaction, together with its `schema_migrations` row.
+  MySQL commits DDL implicitly, so a failed MySQL migration can be half-applied.
+- A database lock stops two processes from migrating at once.
+- `migrate status` marks migrations recorded in the database but missing from code.
+  `down` refuses to roll those back.
+- From code: `migrate.New(db, migrations.Set.List()).Up(ctx)`, e.g. on app start-up.
+  Options: `WithTable`, `WithLog`, `WithoutLock`.
+
+---
+
+## Auto-generated migrations
+
+You can edit model structs directly and let kiln write the migration:
+
+```bash
+kiln diff                  # writes db/migrations/<ts>_auto.go
+kiln diff add_slugs        # ...named add_slugs
+kiln diff --dry-run        # print only
+kiln diff --db             # compare with the live database instead of the migrations
+kiln pull                  # the reverse: models from an existing database
+```
+
+### What the models control
+
+For each table that has a model, the model decides:
+
+- which **columns** exist (new fields are added, removed fields are dropped)
+- each column's **type**, from the Go type, which a `schema` tag can override
+- **nullability**: pointer, `sql.Null*`, slices and maps are nullable; anything else is `NOT NULL`
+
+Everything else is described with a `schema` tag. It is compared only when you declare it, so
+details you wrote by hand in migrations are never "corrected" away.
+
+```go
+type Post struct {
+	ID     int64   `db:"id,primary"`
+	Slug   string  `db:"slug" schema:"limit:80,unique"`
+	Body   string  `db:"body" schema:"type:text"`
+	Price  float64 `db:"price" schema:"type:decimal,precision:10,scale:2"`
+	UserID int64   `db:"user_id" schema:"references:users,ondelete:CASCADE"`
+	Status string  `db:"status" schema:"index,default:draft"`
+	Code   string  `db:"code" schema:"uniqueindex:uniq_posts_code_tenant"`
+	Tenant int64   `db:"tenant" schema:"uniqueindex:uniq_posts_code_tenant"` // composite
+	Title  *string `db:"title"`                                              // nullable
+	Cache  string  `db:"cache" schema:"-"`                                   // not managed by diff
+}
+```
+
+| Tag key | Meaning |
+|---|---|
+| `type:<t>` | `text`, `decimal`, `date`, `time`, `uuid`, `json`, `smallint`, … |
+| `sqltype:<SQL>` | Exact database type |
+| `null` / `notnull` | Override nullability from the Go type |
+| `limit:N`, `precision:P`, `scale:S` | Sizes |
+| `default:V` | Column default |
+| `unique` | Unique index on this column |
+| `index` / `index:name` | Plain index; columns sharing a name form a composite index |
+| `uniqueindex` / `uniqueindex:name` | Same, unique |
+| `references:table[.col]` | Foreign key (also implied by a `belongs_to` association) |
+| `ondelete:ACTION` | `CASCADE`, `SET NULL`, `RESTRICT`, … |
+| `-` | Ignore this field for schema purposes |
+
+### Safety rules
+
+- Tables without a model are **never dropped**, and indexes the models don't mention are
+  left alone.
+- A new `NOT NULL` column gets a zero default, so existing rows are fine. The diff prints a
+  note when it does this.
+- If a column disappears while a similar one appears, the diff prints a **rename hint**.
+  Replace the drop/add pair with `s.RenameColumn(...)` to keep the data.
+- Every generated `Down` restores the previous schema, including dropped columns.
+- The CLI generators write matching tags, so `kiln diff` right after `create`/`add-column`
+  reports "schema is up to date". Running `diff` after `pull` also reports no changes.
+
+**Always read a generated migration before applying it.** It is an ordinary Go file, so you
+can edit it.
+
+---
+
+## Seeds
+
+```bash
+kiln new-seed admin_user     # db/seeds/<ts>_admin_user.go
+kiln seed                    # run all, in file order
+kiln seed admin_user         # run only this one
+```
+
+```go
+func init() {
+	Set.Add("admin_user", func(ctx context.Context, db *orm.DB) error {
+		return orm.For[models.User](db).Insert(ctx,
+			&models.User{Name: "Admin", Email: "admin@example.com"},
+			orm.OnConflictDoNothing("email")) // seeders should be safe to re-run
+	})
+}
+```
+
+Each seeder runs in its own transaction. From code: `seeds.Set.Run(ctx, db, names...)`.
+
+---
+
+## Testing your code
+
+### Unit tests with mocks
+
+Have your services depend on the interfaces instead of concrete types:
+
+```go
+type Signup struct {
+	Users orm.Repository[User] // *orm.Repo[User] satisfies it
+	Tx    orm.Transactor       // *orm.DB satisfies it
+}
+```
+
+Then use `ormtest` in tests, with no database:
+
+```go
+func TestSignup(t *testing.T) {
+	users := ormtest.New[User](t)
+	users.ExpectExists(q.Eq("email", "a@b.c")).Return(false)
+	users.ExpectInsert().
+		Match(func(u *User) bool { return u.Email == "a@b.c" }).
+		Run(func(u *User) { u.ID = 42 }) // simulate the database
+
+	u, err := Signup{Users: users, Tx: ormtest.Tx{}}.Register(ctx, "a@b.c")
+	// ...
+} // unmet expectations fail the test automatically
+```
+
+There is an `Expect…` method for every repository method. Expectations can be refined with
+`Return(v)`, `Error(err)`, `NotFound()`, `Run(fn)`, `RunAll(fn)`, `Match(fn)`, `Times(n)`,
+`Maybe()` and `Always()`. Pass `ormtest.Any` to accept any query. When a call matches no
+expectation, the failure message shows the SQL the call would have run.
+
+### Integration tests
+
+A SQLite database in a temp dir is fast and needs no setup:
+
+```go
+sqldb, _ := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "t.db")+"?_pragma=foreign_keys(1)")
+db := orm.Open(sqldb, dialect.SQLite())
+migrate.New(db, migrations.Set.List()).Up(ctx)
+```
+
+---
+
+## Database notes
+
+| | PostgreSQL | MySQL / MariaDB | SQLite | SQL Server |
+|---|---|---|---|---|
+| Generated keys | `RETURNING` | `LastInsertId` | `RETURNING` | `OUTPUT INSERTED` |
+| Upsert (`OnConflict…`) | ✓ | ✓ | ✓ | ✗ (use `MERGE` via raw SQL) |
+| Transactional DDL | ✓ | ✗ (implicit commit) | ✓ | ✓ |
+| Migration lock | advisory lock | `GET_LOCK` | not needed (single writer) | `sp_getapplock` |
+| Unsupported `ALTER TABLE` | — | — | table rebuild (automatic) | — |
+| JSON column | `JSONB` | `JSON` | `TEXT` | `NVARCHAR(MAX)` |
+
+Tested live against PostgreSQL 18, MariaDB 13 and SQLite. SQL Server is covered by
+SQL-generation tests, and by the integration suite when `MSSQL_DSN` is set.
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Scan error into `time.Time` on MySQL | Add `parseTime=true` to the DSN |
+| Foreign keys not enforced on SQLite | Add `_pragma=foreign_keys(1)` to the DSN |
+| `DATABASE_URL is not set` | `export DATABASE_URL=...` or pass `--dsn` |
+| `go.mod not found` | Run kiln inside your module, after `go mod init` |
+| `diff`/`pull`: `cannot find package` | `go get` the library and your driver, then `go mod tidy` |
+| `applied but missing from code` | A migration file was deleted after being applied. Restore it, or delete its row from `schema_migrations`. |
+| A migration failed half-way on MySQL | MySQL can't roll back DDL. Fix the schema by hand, then re-run. |
+| `diff` keeps suggesting a change | Declare the attribute in the `schema` tag (e.g. `limit:120`), or use `schema:"-"` |
+
+---
+
+## Compared with other Go libraries
+
+An honest overview. Every tool here is good, and they make different trade-offs.
+
+| | GORM | ent | bun | rel | **kiln** |
+|---|---|---|---|---|---|
+| Models | plain structs | generated from a schema DSL | plain structs | plain structs | plain structs |
+| Compile-time checked columns | with the separate `gorm/gen` | ✓ generated predicates | ✗ strings | ✗ strings | ✓ `kiln gen` |
+| Migration files generated from model changes | ✗ (AutoMigrate, no files) | ✓ through Atlas (needs a dev database) | ✗ hand-written | ✗ hand-written | ✓ without a database, or against the live one |
+| Generators that edit your structs (`add-column`, ...) | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Built-in query cache with automatic invalidation | ✗ (plugins) | ✗ (separate package) | ✗ | ✗ | ✓ memory or Redis |
+| Typed mocks for unit tests | ✗ (sqlmock) | ✗ (real SQLite) | ✗ | `reltest` (untyped) | ✓ `ormtest` |
+| SQL Server | ✓ | ✗ | ✓ | ✓ | ✓ (newest, least battle-tested) |
+| Maturity and ecosystem | very large | large | medium | small | **new** |
+
+**Choose something else when:**
+
+- you want the biggest ecosystem, plugins and Stack Overflow answers: **GORM**;
+- your schema is a large graph and you are happy with generated model code: **ent**;
+- you prefer writing SQL and want minimal abstraction: **bun**, or **sqlc** for SQL-first code generation;
+- you need the most mileage in production today: anything above. kiln is new.
+
+**Choose kiln when** you want one tool for the whole loop: plain structs, compile-checked
+queries, migrations written for you from model changes, generators, seeds, caching and mocks,
+with a dependency-free core.
+
+### In detail: go-rel/rel
+
+kiln's repository API was inspired by rel:
+
+| | rel | kiln |
+|---|---|---|
+| Typed generic repository (`Repo[T]`) | ✗ (`interface{}`) | ✓ |
+| Lifecycle hooks | ✗ | ✓ (After-hook failures roll back) |
+| Repository scopes (multi-tenancy) | ✗ | ✓ |
+| Offset pagination with totals, batch iteration | ✗ | ✓ `Paginate`, `Each` |
+| Cursor (keyset) pagination, both directions | ✗ | ✓ |
+| Upsert | partial | ✓ PostgreSQL / MySQL / SQLite |
+| Savepoints for nested transactions | ✗ | ✓ |
+| Composite primary keys | ✗ | ✓ |
+| Many-to-many (preload, link/unlink, cascade) | ✗ | ✓ |
+| Change tracking, cascade insert | ✓ | ✓ |
+| Mocks for unit tests | `reltest` (untyped) | ✓ `ormtest` (generic) |
+| Compile-time checked columns | ✗ | ✓ `kiln gen` |
+| Read replicas | ✓ | ✓ (+ `UsePrimary`, `WithConn`) |
+| Migration lock across processes | ✗ | ✓ |
+| Dry-run SQL, status, redo | partial | ✓ |
+| Model + migration generator that edits models | ✗ | ✓ |
+| Auto-generated migrations from model changes | ✗ | ✓ (from history or live DB) |
+| Models from an existing database | ✗ | ✓ `kiln pull` |
+| SQLite table rebuilds for unsupported ALTERs | ✗ | ✓ |
+| Seeders | ✗ | ✓ |
+| Portable constraint errors | ✓ | ✓ |
+| Driver-free core | adapter per DB | ✓ one dialect package |
+| Query result cache with automatic invalidation | ✗ | ✓ memory or Redis, opt-in per query |
+| Prepared statement cache | ✗ | ✓ opt-in |
+
+---
+
+## Performance
+
+Benchmarks run on SQLite (`cd integration && go test -run '^$' -bench . -benchmem`), next to a
+hand-written `database/sql` baseline:
+
+| Benchmark (Apple M-series) | Time | Allocations |
+|---|---|---|
+| `FindAll`, 1,000 rows | 1.13 ms | 17.8k |
+| hand-written `database/sql`, same query | 0.99 ms | 16.8k |
+| `PreloadAll`, 100 users × 10 posts | 0.61 ms | 6.6k |
+| `InsertAll`, 100 rows | 0.68 ms | 1.7k |
+| `FindByID` | 10 µs | 69 |
+
+Rows are scanned with a column plan built once per query and reused holders, so the ORM
+costs about 15% over hand-written scanning. Identifiers are quoted once and cached.
+
+**Why reflection rather than generated scanning code?** On SQLite, which runs in-process
+and has no network, kiln adds about 0.14 ms per 1,000 rows over hand-written code. On a
+networked database a single round trip usually costs more than that, so code generation
+would make models harder to work with for a gain you would rarely measure. If you need
+those last microseconds, the result cache removes the database trip entirely.
+
+**Caching**: `FindByID` on local servers, in µs per call. Run it with
+`PG_DSN=... MYSQL_DSN=... REDIS_ADDR=... go test -run '^$' -bench Caching -benchmem`:
+
+| | No cache | `WithStmtCache` | `WithCache()` memory | `WithCache` Redis |
+|---|---|---|---|---|
+| SQLite | 10 | 10 | 4–6 | 29 |
+| PostgreSQL | 31–37 | 31–36 | 4–6 | 30 |
+| MariaDB | 58–88 | 31–42 | 4–7 | 34 |
+
+A Redis hit costs a single round trip: the table versions and the entry are fetched together.
+Redis gains the most on expensive queries (joins, aggregates, large lists) or when the
+database is remote.
+
+## Developing kiln
+
+```
+cmd/        CLI (cobra)             internal/gen   generators, diff/pull runners
+q/          query AST               internal/meta  struct reflection + naming
+schema/     migration DSL + State   dialect/       SQL compilers per database
+orm/        runtime                 migrate/       runner, diff, inspect, render
+seed/       seeders                 ormtest/       mocks
+cache/      result cache stores     cache/rediscache  Redis store (separate Go module)
+integration/  end-to-end tests (separate Go module)
+```
+
+```bash
+make test        # vet + unit tests (race detector) + SQLite end-to-end (no services needed)
+make lint        # gofmt + staticcheck, as in CI
+
+# Against real servers, using local installs or `make db-up` (Docker):
+make test-all \
+  PG_DSN="postgres://$USER@localhost:5432/kiln_test?sslmode=disable" \
+  MYSQL_DSN="root@tcp(localhost:3306)/kiln_test?parseTime=true" \
+  MSSQL_DSN= REDIS_ADDR=localhost:6379
+
+# The whole suite again with the prepared statement cache on:
+cd integration && KILN_TEST_STMT_CACHE=1 go test -count=1 -p 1 ./...
+```
+
+Use an empty database for the integration tests, because they create and drop their own
+tables. A database whose `*_DSN` is empty is skipped, and so are the Redis
+cache tests when `REDIS_ADDR` is empty.
+
+---
+
+## License
+
+[MIT](LICENSE)

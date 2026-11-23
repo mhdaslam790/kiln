@@ -1,0 +1,31 @@
+PG_DSN    ?= postgres://postgres:secret@localhost:55432/kiln?sslmode=disable
+MYSQL_DSN ?= root:secret@tcp(localhost:53306)/kiln?parseTime=true
+MSSQL_DSN ?= sqlserver://sa:Secret_Passw0rd@localhost:51433?database=master
+REDIS_ADDR ?= localhost:56379
+
+.PHONY: test test-all lint db-up db-down
+
+# Unit tests + SQLite end-to-end tests (no external services).
+test:
+	go vet ./...
+	go test -race ./...
+	cd cache/rediscache && go vet ./...
+	cd integration && go test -race ./...
+
+# gofmt + staticcheck (as in CI).
+lint:
+	test -z "$$(gofmt -l . | tee /dev/stderr)"
+	go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+	cd cache/rediscache && go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+	cd integration && go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+
+# Everything, against Postgres, MySQL and SQL Server too (run `make db-up` first).
+test-all:
+	go test ./...
+	cd integration && PG_DSN='$(PG_DSN)' MYSQL_DSN='$(MYSQL_DSN)' MSSQL_DSN='$(MSSQL_DSN)' REDIS_ADDR='$(REDIS_ADDR)' go test -count=1 -p 1 ./...
+
+db-up:
+	docker compose -f integration/docker-compose.yml up -d
+
+db-down:
+	docker compose -f integration/docker-compose.yml down
