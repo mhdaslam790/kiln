@@ -1,6 +1,7 @@
 package orm
 
 import (
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ func TestCacheCodecRoundTrip(t *testing.T) {
 		cols: []string{"id", "name", "score", "ok", "blob", "at", "nothing"},
 		rows: [][]any{
 			{int64(-42), "ann", 3.5, true, []byte{0, 1, 2}, ts, nil},
-			{int64(1 << 62), "", -0.0, false, []byte{}, time.Time{}, nil},
+			{int64(1 << 62), "", math.Copysign(0, -1), false, []byte{}, time.Time{}, nil},
 		},
 	}
 	b, err := encodeResult(in)
@@ -36,6 +37,9 @@ func TestCacheCodecRoundTrip(t *testing.T) {
 					t.Fatalf("[%d][%d] %v != %v", i, j, a, b)
 				}
 				continue
+			}
+			if fa, ok := a.(float64); ok && math.Signbit(fa) != math.Signbit(b.(float64)) {
+				t.Fatalf("[%d][%d] sign of %v lost", i, j, a)
 			}
 			if !reflect.DeepEqual(a, b) {
 				t.Fatalf("[%d][%d] %#v != %#v", i, j, a, b)
