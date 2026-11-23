@@ -193,11 +193,24 @@ func renderOp(op schema.Op) []string {
 		if o.Where != "" {
 			opts = append(opts, "schema.PartialWhere("+q(o.Where)+")")
 		}
+		if o.Concurrently {
+			opts = append(opts, "schema.Concurrently()")
+		}
 		return []string{"s.CreateIndex(" + args([]string{q(o.Table), q(o.Name), strList(o.Columns)}, opts) + ")"}
 	case schema.DropIndex:
 		return []string{"s.DropIndex(" + q(o.Table) + ", " + q(o.Name) + ")"}
 	case schema.Exec:
 		return []string{"s.Exec(" + q(o.SQL) + ")"}
+	case schema.AllowUnsafe:
+		return []string{"s.AllowUnsafe(" + args([]string{q(o.Reason)}, quoteAll(o.Checks)) + ")"}
 	}
 	return []string{fmt.Sprintf("// unsupported operation %T", op)}
+}
+
+func quoteAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = q(s)
+	}
+	return out
 }

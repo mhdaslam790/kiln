@@ -133,6 +133,9 @@ func (d *sqlDialect) DDL(op schema.Op) ([]Stmt, error) {
 		}
 		return one(s + t(o.Name))
 
+	case schema.AllowUnsafe:
+		return nil, nil // lint marker, no SQL
+
 	case schema.Exec:
 		st, err := d.Raw(o.SQL, o.Args)
 		if err != nil {
@@ -225,6 +228,9 @@ func (d *sqlDialect) createIndex(o schema.CreateIndex) ([]Stmt, error) {
 		sb.WriteString("UNIQUE ")
 	}
 	sb.WriteString("INDEX ")
+	if o.Concurrently && d.kind == KindPostgres {
+		sb.WriteString("CONCURRENTLY ")
+	}
 	// MySQL has no CREATE INDEX IF NOT EXISTS; the flag is ignored there.
 	if o.IfNotExists && (d.kind == KindPostgres || d.kind == KindSQLite) {
 		sb.WriteString("IF NOT EXISTS ")

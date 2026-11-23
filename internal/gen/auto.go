@@ -137,10 +137,11 @@ type DiffOptions struct {
 }
 
 type diffOutput struct {
-	Up    []string `json:"up"`
-	Down  []string `json:"down"`
-	Notes []string `json:"notes"`
-	Error string   `json:"error"`
+	Up       []string      `json:"up"`
+	Down     []string      `json:"down"`
+	Notes    []string      `json:"notes"`
+	Findings []lintFinding `json:"findings"`
+	Error    string        `json:"error"`
 }
 
 // Diff compares the models with the migrations (or the live database) and
@@ -159,7 +160,7 @@ func (p *Project) Diff(o DiffOptions) error {
 	var src strings.Builder
 	modPkg := lastSegment(p.Config.Models)
 	src.WriteString("package main\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"os\"\n\n")
-	fmt.Fprintf(&src, "\t%q\n\t%q\n\t%q\n", libPath+"/migrate", libPath+"/orm", libPath+"/dialect")
+	fmt.Fprintf(&src, "\t%q\n\t%q\n\t%q\n\t%q\n", libPath+"/migrate", libPath+"/orm", libPath+"/dialect", libPath+"/schema")
 	fmt.Fprintf(&src, "\tmigs %q\n\t%s %q\n", p.importPath(p.Config.Migrations), modPkg, p.importPath(p.Config.Models))
 	d := drivers[p.Config.Dialect]
 	if o.DB {
@@ -171,7 +172,7 @@ func (p *Project) Diff(o DiffOptions) error {
 	for _, m := range models {
 		fmt.Fprintf(&src, "\t\t%s.%s{},\n", modPkg, m.Name)
 	}
-	src.WriteString("\t}\n\tvar res migrate.DiffResult\n\tvar err error\n")
+	src.WriteString("\t}\n\tvar res migrate.DiffResult\n\tvar err error\n\tvar before *schema.State\n")
 	if o.DB {
 		fmt.Fprintf(&src, `	ctx := context.Background()
 	db, err := orm.Connect(ctx, %q, os.Getenv("DATABASE_URL"), dialect.%s())
@@ -182,15 +183,32 @@ func (p *Project) Diff(o DiffOptions) error {
 			err = ierr
 		} else {
 			res, err = migrate.DiffFor(db.Dialect(), state, models...)
+			before = state
 		}
 	}
 `, d.Name, d.Dialect)
 	} else {
 		src.WriteString("\tres, err = migrate.DiffMigrations(migs.Set.List(), models...)\n")
 	}
+	fmt.Fprintf(&src, "\tkind := dialect.Kind(%q)\n", p.Config.Dialect)
 	src.WriteString(`	out := map[string]any{"up": migrate.RenderGo(res.Up), "down": migrate.RenderGo(res.Down), "notes": res.Notes}
 	if err != nil {
 		out["error"] = err.Error()
+	} else if len(res.Up) > 0 {
+		// Lint the new migration against the schema it will run on.
+		up := res.Up
+		next := migrate.Migration{Version: 1 << 62, Name: "new",
+			Up: func(s *schema.Schema) { s.Ops = append(s.Ops, up...) }, Down: func(*schema.Schema) {}}
+		var fs []migrate.Finding
+		if before != nil {
+			fs = migrate.LintOps(kind, before, next, up)
+		} else {
+			fs, _ = migrate.Lint(kind, append(migs.Set.List(), next), func(m migrate.Migration) bool { return m.Version == next.Version })
+		}
+		for i := range fs {
+			fs[i].Version, fs[i].Name = 0, ""
+		}
+		out["findings"] = fs
 	}
 	json.NewEncoder(os.Stdout).Encode(out)
 }
@@ -218,14 +236,23 @@ func (p *Project) Diff(o DiffOptions) error {
 	}
 	if o.DryRun {
 		p.Out("-- up\n%s\n-- down\n%s", strings.Join(out.Up, "\n"), strings.Join(out.Down, "\n"))
-		return nil
+	} else {
+		name := o.Name
+		if name == "" {
+			name = "auto"
+		}
+		if _, err = p.writeMigration(name, out.Up, out.Down); err != nil {
+			return err
+		}
 	}
-	name := o.Name
-	if name == "" {
-		name = "auto"
+	if len(out.Findings) > 0 {
+		p.printFindings(out.Findings)
+		errs, warns, _ := countFindings(out.Findings)
+		if errs+warns > 0 {
+			p.Out("review the migration before applying it (%d error(s), %d warning(s)); `kiln lint` re-checks it", errs, warns)
+		}
 	}
-	_, err = p.writeMigration(name, out.Up, out.Down)
-	return err
+	return nil
 }
 
 // PullOptions configures Pull.

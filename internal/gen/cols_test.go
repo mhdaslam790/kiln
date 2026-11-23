@@ -49,29 +49,12 @@ func TestGenEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs go build")
 	}
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := newProject(t)
-	goVersion := "1.23"
-	if b, err := os.ReadFile(filepath.Join(root, "go.mod")); err == nil {
-		for _, l := range strings.Split(string(b), "\n") {
-			if v, ok := strings.CutPrefix(l, "go "); ok {
-				goVersion = strings.TrimSpace(v)
-			}
-		}
-	}
-	gomod := "module example.com/app\n\ngo " + goVersion + "\n\nrequire github.com/mhdaslam790/kiln v1.0.0\n\nreplace github.com/mhdaslam790/kiln => " + root + "\n"
+	p := linkedProject(t)
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	must(os.WriteFile(p.path("go.mod"), []byte(gomod), 0o644))
-	if sum, err := os.ReadFile(filepath.Join(root, "go.sum")); err == nil {
-		must(os.WriteFile(p.path("go.sum"), sum, 0o644))
 	}
 	must(p.Init(Config{Dialect: "sqlite", Migrations: "db/migrations", Models: "models", Runner: "cmd/migrate", Seeds: "db/seeds"}, false))
 	must(p.Create("User", []string{"email:string:unique", "age:int", "bio:text:null"}, CreateOptions{}))
@@ -112,4 +95,33 @@ var _ = []q.Filter{UserCols.Email.Eq("a"), UserCols.Age.Gte(18), UserCols.Bio.Is
 	if err := p.Gen(GenOptions{Check: true}); err == nil || !strings.Contains(err.Error(), "out of date") {
 		t.Fatalf("--check after a hand edit: %v", err)
 	}
+}
+
+// linkedProject is a temporary project whose go.mod points at this
+// checkout of kiln, so generated helper programs build against it.
+func linkedProject(t *testing.T) *Project {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newProject(t)
+	goVersion := "1.23"
+	if b, err := os.ReadFile(filepath.Join(root, "go.mod")); err == nil {
+		for _, l := range strings.Split(string(b), "\n") {
+			if v, ok := strings.CutPrefix(l, "go "); ok {
+				goVersion = strings.TrimSpace(v)
+			}
+		}
+	}
+	gomod := "module example.com/app\n\ngo " + goVersion + "\n\nrequire github.com/mhdaslam790/kiln v1.0.0\n\nreplace github.com/mhdaslam790/kiln => " + root + "\n"
+	if err := os.WriteFile(p.path("go.mod"), []byte(gomod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if sum, err := os.ReadFile(filepath.Join(root, "go.sum")); err == nil {
+		if err := os.WriteFile(p.path("go.sum"), sum, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return p
 }
