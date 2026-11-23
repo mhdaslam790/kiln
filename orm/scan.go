@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/mhdaslam790/kiln/internal/meta"
 )
@@ -22,6 +24,7 @@ var (
 // and the NULL-safe holders are built once per result set and reused for
 // every row, so scanning allocates little beyond the values themselves.
 type structScanner struct {
+	plan  *scanPlan
 	cols  []colPlan
 	dests []any
 }
@@ -40,6 +43,7 @@ const (
 	skBool
 	skTime
 	skGeneric // anything else: scan through **T
+	skFast    // plain field written in place by a fastDest
 )
 
 type colPlan struct {
@@ -47,59 +51,161 @@ type colPlan struct {
 	kind   scanKind
 	holder any           // reused destination for non-direct kinds
 	ptr    reflect.Value // skGeneric: the **T holder
+	off    uintptr       // skFast: field offset in the struct
+	fast   fastDest      // skFast: the scanner's destination
 }
 
 var timeType = reflect.TypeOf(time.Time{})
+
+// scanPlan is the column layout of one result shape for a model. It is
+// computed once and cached; scanners built from it are pooled, so a query
+// whose columns match the previous one allocates no scanner at all.
+type scanPlan struct {
+	names []string
+	cols  []colPlan // holder and ptr unset: they belong to each scanner
+	pool  sync.Pool
+}
+
+var scanPlans sync.Map // *meta.Model -> *scanPlan (most recent shape)
 
 func newStructScanner(rows *sql.Rows, m *meta.Model) (*structScanner, error) {
 	names, err := rows.Columns()
 	if err != nil {
 		return nil, err
 	}
-	s := &structScanner{cols: make([]colPlan, len(names)), dests: make([]any, len(names))}
+	plan, _ := scanPlans.Load(m)
+	p, _ := plan.(*scanPlan)
+	if p == nil || !equalNames(p.names, names) {
+		p = buildPlan(m, names)
+		scanPlans.Store(m, p)
+	}
+	if sc, ok := p.pool.Get().(*structScanner); ok {
+		return sc, nil
+	}
+	return p.newScanner(), nil
+}
+
+func equalNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func buildPlan(m *meta.Model, names []string) *scanPlan {
+	p := &scanPlan{names: append([]string(nil), names...), cols: make([]colPlan, len(names))}
 	for i, n := range names {
 		f := m.Field(n)
 		c := colPlan{f: f}
 		switch {
 		case f == nil:
-			c.kind, c.holder = skSkip, new(any)
+			c.kind = skSkip
 		case f.JSON:
-			c.kind, c.holder = skJSON, new([]byte)
+			c.kind = skJSON
+		case newFastDest(f.Type) != nil && fastOK(m, f, &c):
+			c.kind = skFast
 		case f.Type.Kind() == reflect.Pointer || reflect.PointerTo(f.Type).Implements(scannerType):
 			c.kind = skDirect
 		case f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.Uint8 && f.Type != bytesType:
-			c.kind, c.holder = skBytes, new([]byte)
+			c.kind = skBytes
 		case f.Type == timeType:
-			c.kind, c.holder = skTime, new(sql.NullTime)
+			c.kind = skTime
 		default:
 			switch f.Type.Kind() {
 			case reflect.String:
-				c.kind, c.holder = skString, new(sql.NullString)
+				c.kind = skString
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				c.kind, c.holder = skInt, new(sql.NullInt64)
+				c.kind = skInt
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-				c.kind, c.holder = skUint, new(sql.NullInt64)
+				c.kind = skUint
 			case reflect.Float32, reflect.Float64:
-				c.kind, c.holder = skFloat, new(sql.NullFloat64)
+				c.kind = skFloat
 			case reflect.Bool:
-				c.kind, c.holder = skBool, new(sql.NullBool)
+				c.kind = skBool
 			default:
 				c.kind = skGeneric
-				c.ptr = reflect.New(reflect.PointerTo(f.Type))
-				c.holder = c.ptr.Interface()
 			}
 		}
-		s.cols[i] = c
+		p.cols[i] = c
+	}
+	return p
+}
+
+// newScanner allocates the per-scanner holders for the plan.
+func (p *scanPlan) newScanner() *structScanner {
+	s := &structScanner{plan: p, cols: make([]colPlan, len(p.cols)), dests: make([]any, len(p.cols))}
+	copy(s.cols, p.cols)
+	for i := range s.cols {
+		c := &s.cols[i]
+		switch c.kind {
+		case skSkip:
+			c.holder = new(any)
+		case skJSON, skBytes:
+			c.holder = new([]byte)
+		case skTime:
+			c.holder = new(sql.NullTime)
+		case skString:
+			c.holder = new(sql.NullString)
+		case skInt, skUint:
+			c.holder = new(sql.NullInt64)
+		case skFloat:
+			c.holder = new(sql.NullFloat64)
+		case skBool:
+			c.holder = new(sql.NullBool)
+		case skGeneric:
+			c.ptr = reflect.New(reflect.PointerTo(c.f.Type))
+			c.holder = c.ptr.Interface()
+		case skFast:
+			c.fast = newFastDest(c.f.Type)
+			c.holder = c.fast
+		}
 		s.dests[i] = c.holder
 	}
-	return s, nil
+	return s
+}
+
+// release clears the scanner (so pooled scanners keep no row data or
+// pointers into the caller's structs alive) and returns it to the pool.
+func (s *structScanner) release() {
+	for i := range s.cols {
+		c := &s.cols[i]
+		switch h := c.holder.(type) {
+		case *any:
+			*h = nil
+		case *[]byte:
+			*h = nil
+		case *sql.NullString:
+			*h = sql.NullString{}
+		case *sql.NullTime:
+			*h = sql.NullTime{}
+		}
+		if c.kind == skDirect {
+			s.dests[i] = nil
+		}
+		if c.kind == skFast {
+			c.fast.set(nil)
+		}
+		if c.kind == skGeneric {
+			c.ptr.Elem().SetZero()
+		}
+	}
+	s.plan.pool.Put(s)
 }
 
 // scan reads the current row into dst (an addressable struct value).
 func (s *structScanner) scan(rows *sql.Rows, dst reflect.Value) error {
+	base := dst.Addr().UnsafePointer()
 	for i := range s.cols {
-		if c := &s.cols[i]; c.kind == skDirect {
+		switch c := &s.cols[i]; c.kind {
+		case skDirect:
 			s.dests[i] = dst.FieldByIndex(c.f.Index).Addr().Interface()
+		case skFast:
+			c.fast.set(unsafe.Add(base, c.off))
 		}
 	}
 	if err := rows.Scan(s.dests...); err != nil {
@@ -107,7 +213,7 @@ func (s *structScanner) scan(rows *sql.Rows, dst reflect.Value) error {
 	}
 	for i := range s.cols {
 		c := &s.cols[i]
-		if c.kind == skSkip || c.kind == skDirect {
+		if c.kind == skSkip || c.kind == skDirect || c.kind == skFast {
 			continue
 		}
 		target := dst.FieldByIndex(c.f.Index)
@@ -144,7 +250,9 @@ func (s *structScanner) scan(rows *sql.Rows, dst reflect.Value) error {
 		case skBool:
 			target.SetBool(c.holder.(*sql.NullBool).Bool)
 		case skTime:
-			target.Set(reflect.ValueOf(c.holder.(*sql.NullTime).Time))
+			// Assign through a typed pointer: reflect.ValueOf(time) would
+			// allocate for every row.
+			*(target.Addr().Interface().(*time.Time)) = c.holder.(*sql.NullTime).Time
 		case skGeneric:
 			if p := c.ptr.Elem(); !p.IsNil() {
 				target.Set(p.Elem())
@@ -165,6 +273,7 @@ func scanAll(ctx context.Context, rows *sql.Rows, m *meta.Model) (reflect.Value,
 	if err != nil {
 		return out, err
 	}
+	defer sc.release()
 	for rows.Next() {
 		out = reflect.Append(out, reflect.Zero(m.Type))
 		if err := sc.scan(rows, out.Index(out.Len()-1)); err != nil {
@@ -272,4 +381,12 @@ func assignSlice(dst reflect.Value, items reflect.Value) error {
 	}
 	dst.Set(out)
 	return nil
+}
+
+// fastOK records the field offset for a fast destination; fields reached
+// through an embedded pointer use the regular path.
+func fastOK(m *meta.Model, f *meta.Field, c *colPlan) bool {
+	off, ok := fieldOffset(m.Type, f.Index)
+	c.off = off
+	return ok
 }

@@ -79,7 +79,7 @@ func (d *sqlDialect) Quote(ident string) string {
 }
 
 func (d *sqlDialect) Rebind(sql string) string {
-	b := &buf{d: d}
+	b := d.newBuf()
 	// Rebind on its own does not validate arg counts; feed nil args.
 	_ = b.raw(sql, nil, false)
 	return b.sb.String()
@@ -122,7 +122,27 @@ func (b *buf) w(s ...string) {
 
 func (b *buf) arg(v any) {
 	b.args = append(b.args, v)
-	b.sb.WriteString(b.d.placeholder(len(b.args)))
+	n := len(b.args)
+	switch b.d.kind {
+	case KindPostgres:
+		b.sb.WriteByte('$')
+	case KindMSSQL:
+		b.sb.WriteString("@p")
+	default:
+		b.sb.WriteByte('?')
+		return
+	}
+	// Append the number without allocating a string.
+	var tmp [20]byte
+	b.sb.Write(strconv.AppendInt(tmp[:0], int64(n), 10))
+}
+
+// newBuf returns a builder sized for a typical statement, so building it
+// does not grow (and copy) the buffer several times.
+func (d *sqlDialect) newBuf() *buf {
+	b := &buf{d: d, args: make([]any, 0, 8)}
+	b.sb.Grow(256)
+	return b
 }
 
 func (b *buf) stmt() Stmt { return Stmt{SQL: b.sb.String(), Args: b.args} }
@@ -298,7 +318,7 @@ func (b *buf) cond(c q.Cond) error {
 // ---- select ---------------------------------------------------------------
 
 func (d *sqlDialect) Select(qq q.Query) (Stmt, error) {
-	b := &buf{d: d}
+	b := d.newBuf()
 	if err := b.selectQuery(qq); err != nil {
 		return Stmt{}, err
 	}
@@ -306,7 +326,7 @@ func (d *sqlDialect) Select(qq q.Query) (Stmt, error) {
 }
 
 func (d *sqlDialect) Count(qq q.Query) (Stmt, error) {
-	b := &buf{d: d}
+	b := d.newBuf()
 	if qq.RawSQL != "" {
 		b.w("SELECT COUNT(*) FROM (")
 		if err := b.raw(qq.RawSQL, qq.RawArgs, true); err != nil {
@@ -437,7 +457,7 @@ func (b *buf) selectQuery(qq q.Query) error {
 // ---- insert / update / delete --------------------------------------------
 
 func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
-	b := &buf{d: d}
+	b := d.newBuf()
 	oc := ins.OnConflict
 	if oc != nil && d.kind == KindMSSQL {
 		return Stmt{}, errors.New("dialect: OnConflict is not supported on SQL Server; use a MERGE via raw SQL")
@@ -559,7 +579,7 @@ func (d *sqlDialect) Update(table string, set []q.Mutation, where q.Filter) (Stm
 	if len(set) == 0 {
 		return Stmt{}, errors.New("dialect: update without SET")
 	}
-	b := &buf{d: d}
+	b := d.newBuf()
 	b.w("UPDATE ", d.Quote(table), " SET ")
 	for i, m := range set {
 		if i > 0 {
@@ -591,7 +611,7 @@ func (d *sqlDialect) Update(table string, set []q.Mutation, where q.Filter) (Stm
 }
 
 func (d *sqlDialect) Delete(table string, where q.Filter) (Stmt, error) {
-	b := &buf{d: d}
+	b := d.newBuf()
 	b.w("DELETE FROM ", d.Quote(table))
 	if where != nil {
 		b.w(" WHERE ")
