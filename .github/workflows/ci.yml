@@ -27,6 +27,7 @@ jobs:
             cache/rediscache/go.sum
             kilnotel/go.sum
             kilnprom/go.sum
+            kilnvalidate/go.sum
       - run: go vet ./...
       - run: go test -race ./...
       - name: Allocation guard (no -race; fails if common operations allocate more)
@@ -40,6 +41,9 @@ jobs:
         run: go vet ./... && go test -race ./...
       - name: Prometheus plugin module
         working-directory: kilnprom
+        run: go vet ./... && go test -race ./...
+      - name: Validation plugin module
+        working-directory: kilnvalidate
         run: go vet ./... && go test -race ./...
       - name: SQLite end-to-end
         working-directory: integration
@@ -60,6 +64,7 @@ jobs:
             cache/rediscache/go.sum
             kilnotel/go.sum
             kilnprom/go.sum
+            kilnvalidate/go.sum
       - name: gofmt
         run: test -z "$(gofmt -l . | tee /dev/stderr)"
       - name: staticcheck
@@ -68,6 +73,7 @@ jobs:
           (cd cache/rediscache && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd kilnotel && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd kilnprom && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
+          (cd kilnvalidate && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd integration && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
 
   databases:
@@ -118,6 +124,7 @@ jobs:
             cache/rediscache/go.sum
             kilnotel/go.sum
             kilnprom/go.sum
+            kilnvalidate/go.sum
       - name: Integration tests
         working-directory: integration
         env:
