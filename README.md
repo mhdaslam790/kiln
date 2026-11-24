@@ -405,6 +405,9 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `audit` | Audit log plugin, its own module; `kiln audit init` writes its table migration. |
 | `kilncrypt` | Column encryption with blind-index search and key rotation, its own module. |
 | `kilnmask` | Masks personal data in API responses and logs (`mask` tags), its own module. |
+| `kilnbreaker` | Circuit breaker: fail fast while the database is down, its own module. |
+| `kilnrw` | Read-your-writes with read replicas, its own module. |
+| `kilnshard` | Split data across databases by key (tenant, customer), its own module. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -1195,6 +1198,91 @@ slog.Info("signup", "user", kilnmask.Log(u)) // masked only if the line is logge
 - Works on any struct, not only kiln models. Pair it with `kilncrypt` for data that must also
   be encrypted at rest.
 
+### Circuit breaker (`kilnbreaker`)
+
+A separate module (`go get github.com/mhdaslam790/kiln/kilnbreaker`, no dependencies). When
+the database is down or hanging, queries fail at once instead of each waiting for its
+timeout, so requests don't pile up, the pool isn't exhausted, and the database isn't flooded
+when it comes back:
+
+```go
+breaker := kilnbreaker.New(
+	kilnbreaker.Failures(5, 10*time.Second), // open after 5 failures within 10s
+	kilnbreaker.Cooldown(30*time.Second),    // then fail fast for 30s, then try one query
+	kilnbreaker.OnChange(func(from, to kilnbreaker.State) { slog.Warn("db breaker", "state", to) }),
+)
+db := orm.Open(sqlDB, dialect.Postgres(), orm.Use(breaker), orm.WithQueryTimeout(2*time.Second))
+
+if errors.Is(err, kilnbreaker.ErrOpen) {
+	http.Error(w, "try again shortly", http.StatusServiceUnavailable)
+}
+// health check: breaker.State() == kilnbreaker.Closed
+```
+
+- Guards every round trip: model queries, raw SQL, writes and transaction starts. Cache hits
+  are still served while it is open.
+- Counts only infrastructure failures: refused or lost connections, timeouts, "too many
+  connections", server starting up or shutting down. `ErrNotFound`, constraint violations,
+  SQL errors and queries the caller cancelled never trip it. Customize with `IsFailure`.
+- Pair it with `WithQueryTimeout`: a hanging database then trips it too.
+- **Set connect timeouts in your DSN.** The breaker only counts queries that return. The SQL
+  Server driver ignores the context while opening a connection and has no login timeout by
+  default, so against a hung server it waits forever: add
+  `dial timeout=5&connection timeout=5` to SQL Server DSNs. (PostgreSQL and MySQL drivers honour
+  the context; `connect_timeout` / `timeout` add a bound of their own.)
+- Costs about 2ns per query while closed, with no allocations. One breaker per `orm.DB`
+  (replicas included).
+
+### Read your writes (`kilnrw`)
+
+With `WithReplicas`, a user who saves and reloads can see old data because the replica is a
+few milliseconds behind. `kilnrw` (its own module, no dependencies) sends *that user's* reads
+to the primary for a short window after they write; everyone else keeps using replicas:
+
+```go
+rw := kilnrw.New(
+	kilnrw.Key(func(ctx context.Context) string { return sessionID(ctx) }), // across requests
+	kilnrw.Window(2*time.Second), // longer than your normal replica lag
+)
+db := orm.Open(primary, dialect.Postgres(), orm.WithReplicas(replica), orm.Use(rw))
+handler = kilnrw.Middleware(handler) // within a request
+```
+
+- **Within a request:** `Middleware` (or `kilnrw.Track(ctx)` in jobs) makes reads after a write
+  in the same request go to the primary.
+- **Across requests** (save → redirect → reload): `Key` identifies the user or session; writes
+  are remembered in memory, expiring after the window, with no background goroutine. With
+  several app instances, pass a shared store (`kilnrw.WithStore`, e.g. backed by Redis).
+- Every write counts: inserts, updates, deletes, `UpdateAny`, raw `Exec`, transactions.
+  `orm.UsePrimary(ctx)` still forces the primary by hand.
+
+### Sharding (`kilnshard`)
+
+When one database can't hold or serve everything, split customers across several. Each shard
+is an ordinary `*orm.DB` (with its own plugins, replicas, breaker); `kilnshard` (its own
+module, no dependencies) only picks which one:
+
+```go
+shards, err := kilnshard.New(map[string]*orm.DB{"shard-1": db1, "shard-2": db2})
+
+ctx = kilnshard.With(ctx, customerID)               // in your middleware
+users, err := kilnshard.For[User](ctx, shards)      // the repo on that customer's shard
+u, err := users.FindByID(ctx, id)
+
+err = shards.Each(ctx, 4, func(ctx context.Context, name string, db *orm.DB) error {
+	return nightlyCleanup(ctx, db) // every shard, 4 at a time; errors name the shard
+})
+applied, err := shards.Migrate(ctx, 4, migrations) // in your migration runner
+```
+
+- **Placement:** by default rendezvous hashing over the shard names: even spread, and adding
+  a shard moves only ~1/N of the keys (to the new shard). Or decide yourself with
+  `kilnshard.Lookup(func(ctx, key) (shard, error))`, e.g. a directory table or region rules.
+  Shard by tenant with `kilnshard.Key(...)` reading `tenant.From(ctx)`.
+- **Not possible across shards:** transactions, joins, single-statement queries over all
+  shards (use `Each`). Moving keys between shards is up to you: copy, then change `Lookup`.
+- Picking a shard costs ~60ns, no allocations.
+
 ### Writing a plugin
 
 A plugin has a `Name` and implements any of three hooks. They run in the order the plugins
@@ -1208,6 +1296,8 @@ caller gets that error unchanged.
 | `AfterQuery(ctx, orm.Event)` | after every statement and cache hit | observe (logging, tracing, metrics) |
 | `AfterWrite(ctx, *orm.WriteInfo) error` | after each record is inserted, updated or deleted, inside the same transaction | record or react to the change (audit); `w.SetValue` / `w.Value` carry data from `BeforeWrite` |
 | `AfterBegin(ctx, *sql.Tx) error` | when a top-level transaction starts | per-transaction session settings (row-level security) |
+| `Allow(ctx) error` / `Done(ctx, err)` | around every statement and transaction start | decide whether to reach the database at all (circuit breaker) |
+| `Wrote(ctx)` / `ReadPrimary(ctx) bool` | after each successful write / before each replica read | route reads to the primary (read-your-writes) |
 
 For example, a plugin that hides rows of archived projects:
 

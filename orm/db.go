@@ -175,6 +175,8 @@ type DB struct {
 	sql          *sql.DB
 	dialect      dialect.Dialect
 	hooks        []func(context.Context, Event) // ObservePlugin.AfterQuery, incl. WithHook
+	guards       []GuardPlugin
+	routes       []RoutePlugin
 	queryPlugins []QueryPlugin
 	writePlugins []WritePlugin
 	txPlugins    []TxPlugin
@@ -351,10 +353,18 @@ func (db *DB) begin(ctx context.Context, opts *sql.TxOptions) (*txState, context
 		tx  *sql.Tx
 		err error
 	)
+	if len(db.guards) != 0 {
+		if err := db.allow(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
 	if c := db.pinned(ctx); c != nil {
 		tx, err = c.BeginTx(ctx, opts)
 	} else {
 		tx, err = db.sql.BeginTx(ctx, opts)
+	}
+	if len(db.guards) != 0 {
+		db.done(ctx, err)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -480,6 +490,9 @@ func (db *DB) reader(ctx context.Context) conn {
 	if len(db.replicas) == 0 || ctx.Value(primaryKey{}) != nil {
 		return db.sql
 	}
+	if len(db.routes) != 0 && db.readPrimary(ctx) {
+		return db.sql
+	}
 	return db.replicas[int(db.rr.Add(1)%uint64(len(db.replicas)))]
 }
 
@@ -513,6 +526,9 @@ func (db *DB) execStmt(ctx context.Context, s dialect.Stmt, o op) (sql.Result, e
 	start := time.Now()
 	res, err := db.exec(ctx, db.conn(ctx), s)
 	db.emit(ctx, s, o, start, err)
+	if len(db.routes) != 0 && err == nil {
+		db.wrote(ctx)
+	}
 	return res, db.wrap(err)
 }
 
@@ -520,7 +536,25 @@ func (db *DB) queryStmt(ctx context.Context, s dialect.Stmt, o op) (*sql.Rows, e
 	start := time.Now()
 	rows, err := db.query(ctx, db.conn(ctx), s)
 	db.emit(ctx, s, o, start, err)
+	if len(db.routes) != 0 && err == nil && o.action != ActionSelect {
+		db.wrote(ctx)
+	}
 	return rows, db.wrap(err)
+}
+
+func (db *DB) wrote(ctx context.Context) {
+	for _, r := range db.routes {
+		r.Wrote(ctx)
+	}
+}
+
+func (db *DB) readPrimary(ctx context.Context) bool {
+	for _, r := range db.routes {
+		if r.ReadPrimary(ctx) {
+			return true
+		}
+	}
+	return false
 }
 
 // Exec runs a raw statement ('?' placeholders are rewritten for the dialect).
