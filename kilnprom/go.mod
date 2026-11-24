@@ -5,7 +5,7 @@ go 1.23.2
 replace github.com/mhdaslam790/kiln => ../
 
 require (
-	github.com/mhdaslam790/kiln v1.3.0
+	github.com/mhdaslam790/kiln v1.4.0
 	github.com/prometheus/client_golang v1.23.2
 )
 
