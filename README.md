@@ -407,6 +407,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `kilnmask` | Masks personal data in API responses and logs (`mask` tags), its own module. |
 | `kilnbreaker` | Circuit breaker: fail fast while the database is down, its own module. |
 | `kilnrw` | Read-your-writes with read replicas, its own module. |
+| `kilnshard` | Split data across databases by key (tenant, customer), its own module. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -1249,6 +1250,33 @@ handler = kilnrw.Middleware(handler) // within a request
   several app instances, pass a shared store (`kilnrw.WithStore`, e.g. backed by Redis).
 - Every write counts: inserts, updates, deletes, `UpdateAny`, raw `Exec`, transactions.
   `orm.UsePrimary(ctx)` still forces the primary by hand.
+
+### Sharding (`kilnshard`)
+
+When one database can't hold or serve everything, split customers across several. Each shard
+is an ordinary `*orm.DB` (with its own plugins, replicas, breaker); `kilnshard` (its own
+module, no dependencies) only picks which one:
+
+```go
+shards, err := kilnshard.New(map[string]*orm.DB{"shard-1": db1, "shard-2": db2})
+
+ctx = kilnshard.With(ctx, customerID)               // in your middleware
+users, err := kilnshard.For[User](ctx, shards)      // the repo on that customer's shard
+u, err := users.FindByID(ctx, id)
+
+err = shards.Each(ctx, 4, func(ctx context.Context, name string, db *orm.DB) error {
+	return nightlyCleanup(ctx, db) // every shard, 4 at a time; errors name the shard
+})
+applied, err := shards.Migrate(ctx, 4, migrations) // in your migration runner
+```
+
+- **Placement:** by default rendezvous hashing over the shard names: even spread, and adding
+  a shard moves only ~1/N of the keys (to the new shard). Or decide yourself with
+  `kilnshard.Lookup(func(ctx, key) (shard, error))`, e.g. a directory table or region rules.
+  Shard by tenant with `kilnshard.Key(...)` reading `tenant.From(ctx)`.
+- **Not possible across shards:** transactions, joins, single-statement queries over all
+  shards (use `Each`). Moving keys between shards is up to you: copy, then change `Lookup`.
+- Picking a shard costs ~60ns, no allocations.
 
 ### Writing a plugin
 

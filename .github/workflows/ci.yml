@@ -60,6 +60,9 @@ jobs:
       - name: Read-your-writes module
         working-directory: kilnrw
         run: go vet ./... && go test -race ./...
+      - name: Sharding module
+        working-directory: kilnshard
+        run: go vet ./... && go test -race ./...
       - name: SQLite end-to-end
         working-directory: integration
         run: go test -race ./...
@@ -94,6 +97,7 @@ jobs:
           (cd kilnmask && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd kilnbreaker && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd kilnrw && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
+          (cd kilnshard && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd integration && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
 
   databases:

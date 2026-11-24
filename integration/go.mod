@@ -17,6 +17,7 @@ require (
 	github.com/mhdaslam790/kiln/kilnbreaker v0.0.0-00010101000000-000000000000 // indirect
 	github.com/mhdaslam790/kiln/kilncrypt v0.0.0-00010101000000-000000000000 // indirect
 	github.com/mhdaslam790/kiln/kilnrw v0.0.0-00010101000000-000000000000 // indirect
+	github.com/mhdaslam790/kiln/kilnshard v0.0.0-00010101000000-000000000000 // indirect
 )
 
 require (
@@ -52,5 +53,7 @@ replace github.com/mhdaslam790/kiln/kilncrypt => ../kilncrypt
 replace github.com/mhdaslam790/kiln/kilnbreaker => ../kilnbreaker
 
 replace github.com/mhdaslam790/kiln/kilnrw => ../kilnrw
+
+replace github.com/mhdaslam790/kiln/kilnshard => ../kilnshard
 
 replace github.com/mhdaslam790/kiln/cache/rediscache => ../cache/rediscache
