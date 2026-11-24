@@ -294,6 +294,10 @@ func (d *sqlDialect) changeColumn(o schema.ChangeColumn) ([]Stmt, error) {
 			return nil, err
 		}
 		parts = append(parts, "ALTER COLUMN "+col+" SET DEFAULT "+lit)
+	} else {
+		// ChangeColumn describes the whole new column, as on MySQL and SQL
+		// Server: no default given means no default.
+		parts = append(parts, "ALTER COLUMN "+col+" DROP DEFAULT")
 	}
 	return []Stmt{{SQL: "ALTER TABLE " + t + " " + strings.Join(parts, ", ")}}, nil
 }

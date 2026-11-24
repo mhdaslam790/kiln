@@ -278,7 +278,7 @@ ALTER TABLE "users" DROP COLUMN "legacy";
 ALTER TABLE "users" RENAME TO "people";
 CREATE UNIQUE INDEX IF NOT EXISTS "uniq_people_email" ON "people" ("email");
 DROP INDEX "uniq_people_email";
-ALTER TABLE "people" ALTER COLUMN "age" TYPE BIGINT, ALTER COLUMN "age" SET NOT NULL`,
+ALTER TABLE "people" ALTER COLUMN "age" TYPE BIGINT, ALTER COLUMN "age" SET NOT NULL, ALTER COLUMN "age" DROP DEFAULT`,
 		KindMySQL: "ALTER TABLE `users` ADD COLUMN `nickname` VARCHAR(255) DEFAULT 'anon';\nALTER TABLE `users` RENAME COLUMN `name` TO `full_name`;\nALTER TABLE `users` DROP COLUMN `legacy`;\nRENAME TABLE `users` TO `people`;\nCREATE UNIQUE INDEX `uniq_people_email` ON `people` (`email`);\nDROP INDEX `uniq_people_email` ON `people`;\nALTER TABLE `people` MODIFY COLUMN `age` BIGINT NOT NULL",
 		KindSQLite: `ALTER TABLE "users" ADD COLUMN "nickname" VARCHAR(255) DEFAULT 'anon';
 ALTER TABLE "users" RENAME COLUMN "name" TO "full_name";
