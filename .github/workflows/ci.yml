@@ -51,6 +51,9 @@ jobs:
       - name: Encryption module
         working-directory: kilncrypt
         run: go vet ./... && go test -race ./...
+      - name: Masking module
+        working-directory: kilnmask
+        run: go vet ./... && go test -race ./...
       - name: SQLite end-to-end
         working-directory: integration
         run: go test -race ./...
@@ -82,6 +85,7 @@ jobs:
           (cd kilnvalidate && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd audit && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd kilncrypt && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
+          (cd kilnmask && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd integration && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
 
   databases:
