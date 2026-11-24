@@ -571,7 +571,7 @@ the same table and column information at runtime, which is useful for admin scre
 
 ```go
 err = users.Insert(ctx, &u)                // fills u.ID, CreatedAt, UpdatedAt
-err = users.InsertAll(ctx, batch)          // one multi-row INSERT; IDs filled in place
+err = users.InsertAll(ctx, batch)          // batched multi-row INSERTs; IDs filled in place
 err = users.Update(ctx, &u)                // all columns
 err = users.Update(ctx, &u, "Name")        // only these fields (+ updated_at)
 err = users.Save(ctx, &u)                  // insert if new, update otherwise
@@ -1293,7 +1293,23 @@ How it stays fast, with nothing to configure:
 - the column plan for each model is built once and cached, and row readers are pooled;
 - plain fields (`string`, `int`, `int64`, `float64`, `bool`, `time.Time`) are written straight
   into the struct without temporary values; `NULL` still becomes the zero value;
-- SQL is built in a pre-sized buffer, and quoted identifiers are cached.
+- SQL is built in a pre-sized buffer, and quoted identifiers are cached;
+- `InsertAll` sends rows in batches inside one transaction, sized for each database, and still
+  gives every record the id the database stored for it.
+
+**Batched inserts.** `InsertAll` needs no options; it picks the fastest form per database.
+Inserting 1,000 rows (local servers, Apple M-series):
+
+| Database | How `InsertAll` sends rows | One by one (in a transaction) | `InsertAll` | Faster |
+|---|---|---|---|---|
+| PostgreSQL | multi-row `INSERT ... RETURNING` | 35–44 ms | 6–8 ms | 5–6× |
+| MySQL / MariaDB | multi-row `INSERT`, ids from `LAST_INSERT_ID()` | 53–82 ms | 5–6 ms | 10–13× |
+| SQLite | small multi-row `INSERT ... RETURNING` (~256 values each) | 17 ms | 5.4 ms | 3× |
+| SQL Server | `MERGE ... OUTPUT`, up to 1,000 rows each | — | — | fewer round trips |
+
+Inserts with `Cascade()` or an `OnConflict…` option (on auto-increment ids), and records whose ids
+you set yourself on SQL Server, go row by row so every id stays correct.
+Before/after insert hooks still run for every record.
 
 **Why reflection rather than generated scanning code?** With the optimisations above, the
 remaining gap is a few hundred nanoseconds per query, less than any network round trip.

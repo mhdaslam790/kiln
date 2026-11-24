@@ -147,7 +147,7 @@ func TestInsert(t *testing.T) {
 		KindPostgres: `INSERT INTO "users" ("name", "age") VALUES ($1, $2), ($3, $4) RETURNING "id"`,
 		KindMySQL:    "INSERT INTO `users` (`name`, `age`) VALUES (?, ?), (?, ?)",
 		KindSQLite:   `INSERT INTO "users" ("name", "age") VALUES (?, ?), (?, ?) RETURNING "id"`,
-		KindMSSQL:    `INSERT INTO [users] ([name], [age]) OUTPUT INSERTED.[id] VALUES (@p1, @p2), (@p3, @p4)`,
+		KindMSSQL:    `MERGE INTO [users] USING (VALUES (@p1, @p2, 0), (@p3, @p4, 1)) AS s ([name], [age], [kiln_pos]) ON 1 = 0 WHEN NOT MATCHED THEN INSERT ([name], [age]) VALUES (s.[name], s.[age]) OUTPUT s.[kiln_pos], INSERTED.[id];`,
 	})
 }
 

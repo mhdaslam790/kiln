@@ -38,6 +38,12 @@ type Insert struct {
 	OnConflict *q.OnConflict
 }
 
+// PositionColumn is the extra result column of a multi-row Insert with
+// Returning on SQL Server. Such an insert is compiled to a MERGE that
+// returns (position, value) pairs, because the row order of OUTPUT is not
+// guaranteed; position is the 0-based index into Rows.
+const PositionColumn = "kiln_pos"
+
 // Stmt is a compiled statement.
 type Stmt struct {
 	SQL  string

@@ -98,6 +98,43 @@ func BenchmarkInsertAll100(b *testing.B) {
 	}
 }
 
+func BenchmarkInsertAll1000(b *testing.B) {
+	db := benchDB(b, 0, 0)
+	users, ctx := orm.For[User](db), context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		list := make([]User, 1000)
+		for j := range list {
+			list[j] = User{Name: "n", Email: fmt.Sprintf("e%d_%d@x.io", i, j)}
+		}
+		if err := users.InsertAll(ctx, list); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkInsertOneByOne1000(b *testing.B) {
+	db := benchDB(b, 0, 0)
+	users, ctx := orm.For[User](db), context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := db.Transaction(ctx, func(ctx context.Context) error {
+			for j := 0; j < 1000; j++ {
+				u := User{Name: "n", Email: fmt.Sprintf("e%d_%d@x.io", i, j)}
+				if err := users.Insert(ctx, &u); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkFindByID(b *testing.B) {
 	db := benchDB(b, 1000, 0)
 	users, ctx := orm.For[User](db), context.Background()

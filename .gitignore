@@ -20,3 +20,6 @@ dist/
 # Environment
 .env
 .env.*
+
+# local planning notes
+PLAN.md
