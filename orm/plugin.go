@@ -207,10 +207,23 @@ func (db *DB) runQueryPlugins(ctx context.Context, a Action, m *meta.Model, qq q
 	return *info.Query, info.Set, nil
 }
 
-// beforeWrite runs the write plugins on one record.
-func (db *DB) beforeWrite(ctx context.Context, a Action, m *meta.Model, v reflect.Value, fields []string) error {
+// beforeWrite runs the write plugins on one record. targets are the
+// fields an update writes, unless all is true.
+func (db *DB) beforeWrite(ctx context.Context, a Action, m *meta.Model, v reflect.Value, targets []*meta.Field, all bool) error {
 	if len(db.writePlugins) == 0 {
 		return nil
+	}
+	return db.runWritePlugins(ctx, a, m, v, targets, all)
+}
+
+// runWritePlugins is the slow path of beforeWrite.
+func (db *DB) runWritePlugins(ctx context.Context, a Action, m *meta.Model, v reflect.Value, targets []*meta.Field, all bool) error {
+	var fields []string
+	if !all {
+		fields = make([]string, len(targets))
+		for i, f := range targets {
+			fields[i] = f.Column
+		}
 	}
 	w := &WriteInfo{Action: a, Table: m.Table, Model: modelInfo(m), Record: v.Addr().Interface(), Fields: fields, m: m, v: v}
 	for _, p := range db.writePlugins {

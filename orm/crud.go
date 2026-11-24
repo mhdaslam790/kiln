@@ -393,7 +393,7 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 		}
 	}
 	db.touchCreate(m, v)
-	if err := db.beforeWrite(ctx, ActionInsert, m, v, nil); err != nil {
+	if err := db.beforeWrite(ctx, ActionInsert, m, v, nil, true); err != nil {
 		return err
 	}
 	cols, vals, retPK, err := insertColumns(m, v, true)
@@ -539,7 +539,7 @@ func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Val
 			return err
 		}
 		db.touchCreate(m, v)
-		if err := db.beforeWrite(ctx, ActionInsert, m, v, nil); err != nil {
+		if err := db.beforeWrite(ctx, ActionInsert, m, v, nil, true); err != nil {
 			return err
 		}
 	}
@@ -638,10 +638,7 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 	if m.UpdatedAt != nil {
 		setTime(v.FieldByIndex(m.UpdatedAt.Index), db.now())
 	}
-	var (
-		targets []*meta.Field
-		cols    []string // nil = every column, for plugins
-	)
+	var targets []*meta.Field
 	if len(fields) == 0 {
 		for _, f := range m.Fields {
 			if isPK(m, f) || f == m.CreatedAt || f.ReadOnly {
@@ -665,11 +662,8 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 		if m.UpdatedAt != nil && !seen[m.UpdatedAt] {
 			targets = append(targets, m.UpdatedAt)
 		}
-		for _, f := range targets {
-			cols = append(cols, f.Column)
-		}
 	}
-	if err := db.beforeWrite(ctx, ActionUpdate, m, v, cols); err != nil {
+	if err := db.beforeWrite(ctx, ActionUpdate, m, v, targets, len(fields) == 0); err != nil {
 		return err
 	}
 	muts := make([]q.Mutation, 0, len(targets))

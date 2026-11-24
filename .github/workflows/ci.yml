@@ -27,6 +27,9 @@ jobs:
             cache/rediscache/go.sum
       - run: go vet ./...
       - run: go test -race ./...
+      - name: Allocation guard (no -race; fails if common operations allocate more)
+        if: matrix.go == 'stable' # limits are measured with the current compiler
+        run: go test -count=1 -run TestAllocGuard ./orm
       - name: Redis store module
         working-directory: cache/rediscache
         run: go vet ./...

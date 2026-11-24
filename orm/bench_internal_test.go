@@ -106,7 +106,7 @@ type fakeConnector struct{ d *fakeDriver }
 func (c fakeConnector) Connect(context.Context) (driver.Conn, error) { return &fakeConn{d: c.d}, nil }
 func (c fakeConnector) Driver() driver.Driver                        { return c.d }
 
-func fakeDB(b *testing.B, rows int) (*DB, *sql.DB) {
+func fakeDB(b testing.TB, rows int) (*DB, *sql.DB) {
 	b.Helper()
 	sqldb := sql.OpenDB(fakeConnector{&fakeDriver{rows: rows}})
 	b.Cleanup(func() { sqldb.Close() })
