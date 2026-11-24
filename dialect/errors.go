@@ -12,6 +12,10 @@ const (
 	ErrForeignKey
 	ErrNotNull
 	ErrCheck
+	// ErrRetryable: the database aborted the transaction on purpose (a
+	// deadlock, a serialization failure, a busy database) and running the
+	// whole transaction again may succeed.
+	ErrRetryable
 )
 
 func (k ErrorKind) String() string {
@@ -24,6 +28,8 @@ func (k ErrorKind) String() string {
 		return "not null"
 	case ErrCheck:
 		return "check"
+	case ErrRetryable:
+		return "retryable"
 	}
 	return "other"
 }
@@ -46,6 +52,8 @@ func (d *sqlDialect) Classify(err error) ErrorKind {
 	switch d.kind {
 	case KindPostgres:
 		switch {
+		case has("40001", "40p01", "could not serialize access", "deadlock detected"):
+			return ErrRetryable
 		case has("23505", "duplicate key value"):
 			return ErrUnique
 		case has("23503", "violates foreign key"):
@@ -57,6 +65,8 @@ func (d *sqlDialect) Classify(err error) ErrorKind {
 		}
 	case KindMySQL:
 		switch {
+		case has("error 1213", "deadlock found", "error 1205", "lock wait timeout exceeded"):
+			return ErrRetryable
 		case has("error 1062", "duplicate entry"):
 			return ErrUnique
 		case has("error 1451", "error 1452", "foreign key constraint fails"):
@@ -68,6 +78,8 @@ func (d *sqlDialect) Classify(err error) ErrorKind {
 		}
 	case KindSQLite:
 		switch {
+		case has("database is locked", "database table is locked", "sqlite_busy"):
+			return ErrRetryable
 		case has("unique constraint failed", "primary key constraint failed"):
 			return ErrUnique
 		case has("foreign key constraint failed"):
@@ -79,6 +91,8 @@ func (d *sqlDialect) Classify(err error) ErrorKind {
 		}
 	case KindMSSQL:
 		switch {
+		case has("chosen as the deadlock victim", "snapshot isolation transaction aborted due to update conflict"):
+			return ErrRetryable
 		case has("violation of unique key", "violation of primary key", "cannot insert duplicate key"):
 			return ErrUnique
 		case has("foreign key constraint"):

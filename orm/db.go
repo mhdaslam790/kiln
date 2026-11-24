@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -139,6 +140,22 @@ func (db *DB) stmtCtx(ctx context.Context) (context.Context, context.CancelFunc)
 	return context.WithTimeout(ctx, db.timeout)
 }
 
+// WithRetry runs a top-level Transaction again, up to n more times, when
+// the database aborts it on purpose: a deadlock, a serialization failure
+// (SERIALIZABLE / REPEATABLE READ conflicts), a lock wait timeout on MySQL
+// or a busy SQLite database. These are expected under load and the
+// database's advice is to retry; without retrying, users see random
+// errors.
+//
+// The whole function runs again in a new transaction, never a single
+// statement inside one (that would apply half a transaction twice), so it
+// must be safe to repeat: keep side effects such as sending email or
+// calling other services outside it. Attempts wait 10ms, 20ms, 40ms ...
+// (with jitter, at most 1s) and stop early when ctx is done. Nested
+// Transactions, db.Begin and statements outside a transaction are not
+// retried. The last error is returned if every attempt fails.
+func WithRetry(n int) Option { return func(db *DB) { db.retries = n } }
+
 // WithClock overrides time.Now for timestamps (useful in tests).
 func WithClock(now func() time.Time) Option { return func(db *DB) { db.now = now } }
 
@@ -156,6 +173,7 @@ type DB struct {
 	timeout      time.Duration // per statement; 0 = none (WithQueryTimeout)
 	cache        *resultCache  // nil unless WithCache
 	stmts        *stmtCache    // nil unless WithStmtCache
+	retries      int           // WithRetry
 }
 
 // Open wraps an existing *sql.DB.
@@ -262,10 +280,37 @@ func (db *DB) Transaction(ctx context.Context, fn func(ctx context.Context) erro
 
 // TransactionOpts is Transaction with explicit isolation / read-only options
 // (ignored for nested transactions).
-func (db *DB) TransactionOpts(ctx context.Context, opts *sql.TxOptions, fn func(ctx context.Context) error) (err error) {
+func (db *DB) TransactionOpts(ctx context.Context, opts *sql.TxOptions, fn func(ctx context.Context) error) error {
 	if st := db.txFrom(ctx); st != nil {
 		return db.savepoint(ctx, st, fn)
 	}
+	err := db.runTx(ctx, opts, fn)
+	for i := 0; err != nil && i < db.retries && db.dialect.Classify(err) == dialect.ErrRetryable; i++ {
+		if !backoff(ctx, i) {
+			return err
+		}
+		err = db.runTx(ctx, opts, fn)
+	}
+	return err
+}
+
+// backoff waits before retry attempt i (10ms doubling, at most 1s, with
+// full jitter) and reports false if ctx ended first.
+func backoff(ctx context.Context, i int) bool {
+	d := min(10*time.Millisecond<<i, time.Second)
+	t := time.NewTimer(d/2 + rand.N(d/2+1))
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// runTx runs fn in one new transaction: commit on nil, roll back on an
+// error or panic.
+func (db *DB) runTx(ctx context.Context, opts *sql.TxOptions, fn func(ctx context.Context) error) (err error) {
 	st, tctx, err := db.begin(ctx, opts)
 	if err != nil {
 		return err
