@@ -46,6 +46,11 @@ func TestRetry(t *testing.T) {
 		t.Fatalf("plain error: err=%v runs=%d", err, runs)
 	}
 
+	runs = 0
+	if err := db.Transaction(ctx, func(context.Context) error { runs++; return ErrStale }); err != ErrStale || runs != 1 {
+		t.Fatalf("ErrStale must not be retried: runs=%d", runs)
+	}
+
 	// Nested transactions are not retried on their own: the outer one is.
 	runs = 0
 	inner := 0
