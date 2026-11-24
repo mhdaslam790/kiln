@@ -161,9 +161,13 @@ Models go in `internal/domain` (created by your first `kiln create`). See
   "runner": "cmd/migrate",
   "seeds": "database/seeds",
   "repositories": "internal/repository",
-  "usecases": "internal/usecase"
+  "usecases": "internal/usecase",
+  "tenant_column": "tenant_id"
 }
 ```
+
+`tenant_column` is optional: set it when you use the [tenant plugin](#multi-tenancy-tenant)
+and `kiln lint` also checks that tenant tables are indexed.
 
 Prefer models at the top level without layers? `kiln init --layout flat` uses `models/`
 instead of `internal/domain`. Every path is a setting, so you can also pick your own.
@@ -891,7 +895,8 @@ id, ok := tenant.From(ctx)          // read it back
 - **Not filtered:** raw SQL (`db.Query`, `db.Exec`, `q.SQL`), joined tables (only the queried
   table) and many-to-many join tables. Scope those yourself.
 - Cost: the same as writing the filter by hand, plus about 0.15 µs per query. Add an index
-  that starts with the tenant column on each tenant table.
+  that starts with the tenant column on each tenant table; with `"tenant_column": "tenant_id"`
+  in `kiln.json`, `kiln lint` reports tables that lack one.
 
 **Adding tenants to an existing app.** If your tables already have an organisation column,
 use it: `tenant.Plugin("org_id")`. Otherwise, roll it out in three deploys so the app keeps
@@ -1248,6 +1253,7 @@ a table created in the **same** migration are never reported (it is still empty)
 | `foreign-key-on-existing` | info | Every existing row is checked while locks are held |
 | `raw-sql` | info | `s.Exec` / `s.Do` steps cannot be checked |
 | `irreversible` | info | No `Down` function |
+| `tenant-column-without-index` | warning | With `tenant_column` in `kiln.json` (or `--tenant-column`): a table with the tenant column but no index starting with it, so every tenant query scans all tenants' rows. Checks the schema after all migrations |
 
 Errors make `kiln lint` exit non-zero; with `--strict`, warnings do too.
 

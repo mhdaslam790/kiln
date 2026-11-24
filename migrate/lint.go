@@ -73,6 +73,8 @@ var Checks = map[string]Severity{
 	"raw-sql":                  Info,
 	"irreversible":             Info,
 	"allow-unsafe-no-reason":   Error,
+	// Reported by LintTenantIndexes (kiln lint with a tenant column).
+	"tenant-column-without-index": Warning,
 }
 
 // Lint checks migrations for operations that are risky on a production
@@ -303,4 +305,106 @@ func (m *Migrator) LintPending(ctx context.Context) ([]Finding, error) {
 		return nil, nil
 	}
 	return Lint(m.db.Dialect().Kind(), m.list, func(mg Migration) bool { return want[mg.Version] })
+}
+
+// LintTenantIndexes checks the schema built by every migration in history
+// for tables that have the tenant column but no index starting with it.
+// With the tenant plugin every query on such a table filters on that
+// column, so without an index each query scans all tenants' rows.
+//
+// A finding is attributed to the migration that added the column; silence
+// it there with s.AllowUnsafe("why", "tenant-column-without-index").
+func LintTenantIndexes(history []Migration, column string) ([]Finding, error) {
+	if column == "" {
+		return nil, nil
+	}
+	sorted := append([]Migration(nil), history...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Version < sorted[j].Version })
+	type origin struct {
+		mg      Migration
+		allowed bool
+	}
+	added := map[string]origin{} // table -> migration that added the tenant column
+	state := schema.NewState()
+	for _, mg := range sorted {
+		var s schema.Schema
+		mg.Up(&s)
+		allowed := false
+		for _, op := range s.Ops {
+			if a, ok := op.(schema.AllowUnsafe); ok {
+				allowed = allowed || len(a.Checks) == 0 || contains(a.Checks, "tenant-column-without-index")
+			}
+		}
+		for _, op := range s.Ops {
+			switch o := op.(type) {
+			case schema.CreateTable:
+				for _, c := range o.Columns {
+					if c.Name == column {
+						added[o.Name] = origin{mg, allowed}
+					}
+				}
+			case schema.AddColumn:
+				if o.Column.Name == column {
+					added[o.Table] = origin{mg, allowed}
+				}
+			case schema.RenameTable:
+				if a, ok := added[o.Name]; ok {
+					delete(added, o.Name)
+					added[o.NewName] = a
+				}
+			}
+			if err := state.Apply(op); err != nil {
+				return nil, fmt.Errorf("replaying %d_%s: %w", mg.Version, mg.Name, err)
+			}
+		}
+	}
+	tables := make([]string, 0, len(state.Tables))
+	for name := range state.Tables {
+		tables = append(tables, name)
+	}
+	sort.Strings(tables)
+	var out []Finding
+	for _, name := range tables {
+		t := state.Tables[name]
+		if t.Column(column) == nil || leadingIndex(t, column) {
+			continue
+		}
+		o := added[name]
+		if o.allowed {
+			continue
+		}
+		out = append(out, Finding{
+			Version: o.mg.Version, Name: o.mg.Name, Check: "tenant-column-without-index",
+			Severity: Checks["tenant-column-without-index"], Table: name, Column: column,
+			Message: "every tenant query filters on this column, but no index starts with it, so each query scans all tenants' rows",
+			Fix:     fmt.Sprintf(`s.CreateIndex(%q, "", []string{%q}, schema.Concurrently()) in a migration of its own (or an index starting with %s)`, name, column, column),
+		})
+	}
+	return out, nil
+}
+
+// leadingIndex reports whether an index, unique constraint or primary key
+// of t starts with column.
+func leadingIndex(t *schema.TableState, column string) bool {
+	if len(t.PrimaryKey) > 0 && t.PrimaryKey[0] == column {
+		return true
+	}
+	if c := t.Column(column); c != nil && c.Unique {
+		return true
+	}
+	for _, ix := range t.Indexes {
+		if len(ix.Columns) > 0 && ix.Columns[0] == column {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
