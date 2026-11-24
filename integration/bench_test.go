@@ -16,6 +16,7 @@ import (
 	"github.com/mhdaslam790/kiln/migrate"
 	"github.com/mhdaslam790/kiln/orm"
 	"github.com/mhdaslam790/kiln/q"
+	"github.com/mhdaslam790/kiln/tenant"
 )
 
 // Benchmarks run on SQLite so they need no services:
@@ -282,5 +283,24 @@ func BenchmarkCaching(b *testing.B) {
 				})
 			}
 		})
+	}
+}
+
+// BenchmarkTenantFindByID is BenchmarkFindByID with the tenant plugin, to
+// show its cost per query.
+func BenchmarkTenantFindByID(b *testing.B) {
+	db := benchDB(b, 0, 0, tenant.Plugin("tenant_id"))
+	users := orm.For[User](db)
+	ctx := tenant.With(context.Background(), int64(1))
+	u := User{Name: "n", Email: "e@x.io"}
+	if err := users.Insert(ctx, &u); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := users.FindByID(ctx, u.ID); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

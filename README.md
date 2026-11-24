@@ -59,8 +59,10 @@ kiln migrate up
 - `kilntest`: each test runs in a transaction that is rolled back at the end, plus factories.
 
 **Extending**
-- Plugins enabled with one line (`orm.Use(...)`): add filters, set values on write, observe
-  every query. Multi-tenancy, tracing and metrics plugins are on the way.
+- Plugins enabled with one line: add filters, set values on write, observe every query.
+- Multi-tenancy built in (`tenant.Plugin("tenant_id")`): every query is scoped to the tenant in
+  the `ctx`, and a missing tenant is an error, never a leak. Tracing and metrics plugins are on
+  the way.
 
 **Go-first design**
 - Built on `database/sql`; the core has no dependencies, not even drivers.
@@ -83,7 +85,7 @@ Start with [Features](#features), or jump in:
 9. [Transactions](#transactions)
 10. [Pagination](#pagination)
 11. [Hooks, scopes, logging, replicas](#hooks-scopes-logging-replicas)
-12. [Plugins](#plugins): one-line extensions (multi-tenancy, tracing, metrics) and writing your own
+12. [Plugins](#plugins): one-line extensions, multi-tenancy, and writing your own
 13. [Caching](#caching): query results (memory or Redis) and prepared statements
 14. [Migrations](#migrations)
 15. [Auto-generated migrations](#auto-generated-migrations)
@@ -392,6 +394,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `cache` | Storage for the query result cache: the `Store` interface and the in-memory LRU. Redis lives in the separate module `cache/rediscache`. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
+| `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
 
 **Key mechanisms**
 
@@ -854,6 +857,41 @@ db := orm.Open(sqlDB, dialect.Postgres(), myplugin.Plugin())
 ```
 
 `WithHook` and `WithLogger` are built on the same mechanism.
+
+### Multi-tenancy (`tenant`)
+
+Many customers (tenants) share the same tables, and each row names its owner in a tenant
+column. The `tenant` plugin scopes every query to the tenant in the request's `ctx`:
+
+```go
+import "github.com/mhdaslam790/kiln/tenant"
+
+db := orm.Open(sqlDB, dialect.Postgres(), tenant.Plugin("tenant_id"))
+
+// In the middleware that authenticates the request:
+ctx = tenant.With(ctx, claims.OrgID) // string, int, UUID type: whatever the column holds
+
+users.FindAll(ctx)                  // SELECT ... WHERE users.tenant_id = $1
+users.Insert(ctx, &u)               // sets u.TenantID
+users.FindAll(context.Background()) // error: tenant.ErrNoTenant
+users.FindAll(tenant.Bypass(ctx))   // admin tools, background jobs: all tenants
+id, ok := tenant.From(ctx)          // read it back
+```
+
+- Applies to every model with the column; other tables are untouched and need no tenant.
+- Filters selects, counts, pagination, preloads, updates and deletes (including `UpdateAny`
+  and `DeleteAny`).
+- Fills the column on insert. A record that names a different tenant, an update that moves a
+  record, or `q.Set("tenant_id", ...)` returns `tenant.ErrCrossTenant`.
+- **Fails safe:** without a tenant in the `ctx`, queries on tenant tables return
+  `tenant.ErrNoTenant` instead of running unfiltered. Under `Bypass`, inserts must set the
+  column themselves.
+- Cached results are kept apart per tenant, because the filter is part of the cache key.
+- Works with `kilntest`: `tenant.With(kilntest.Tx(t, db), id)`.
+- **Not filtered:** raw SQL (`db.Query`, `db.Exec`, `q.SQL`), joined tables (only the queried
+  table) and many-to-many join tables. Scope those yourself.
+- Cost: the same as writing the filter by hand, plus about 0.15 µs per query. Add an index
+  that starts with the tenant column on each tenant table.
 
 ### Writing a plugin
 
@@ -1388,6 +1426,7 @@ An honest overview. Every tool here is good, and they make different trade-offs.
 | Batched multi-row inserts | ✓ `CreateInBatches` | ✓ `CreateBulk` | ✓ | ✓ `InsertAll` | ✓ `InsertAll`, ids correct on all four databases |
 | Extension points | callbacks, plugins | hooks, interceptors | hooks | ✗ | one-line plugins, free when unused |
 | Allocation limits enforced in CI | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Multi-tenancy that fails safe | ✗ (scopes by hand) | by hand (privacy rules, interceptors) | ✗ | ✗ | ✓ `tenant.Plugin` |
 | SQL Server | ✓ | ✗ | ✓ | ✓ | ✓ (newest, least battle-tested) |
 | Maturity and ecosystem | very large | large | medium | small | **new** |
 
@@ -1520,7 +1559,7 @@ q/          query AST               internal/meta  struct reflection + naming
 schema/     migration DSL + State   dialect/       SQL compilers per database
 orm/        runtime                 migrate/       runner, diff, inspect, render
 seed/       seeders                 ormtest/       mocks
-kilntest/   test tx + factories
+kilntest/   test tx + factories     tenant/        multi-tenancy plugin
 cache/      result cache stores     cache/rediscache  Redis store (separate Go module)
 integration/  end-to-end tests (separate Go module)
 ```
