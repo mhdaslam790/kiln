@@ -23,7 +23,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -47,25 +46,15 @@ func Tx(t testing.TB, db *orm.DB) context.Context {
 	return tx.Context()
 }
 
-var (
-	migratedMu sync.Mutex
-	migrated   = map[*orm.DB]bool{}
-)
-
-// Migrate applies pending migrations, failing the test on error. It runs
-// once per DB in a test binary; later calls return at once, so every test
-// can call it.
+// Migrate applies pending migrations, failing the test on error. When
+// nothing is pending it only reads the migrations table (about 15 µs on
+// SQLite, 100 µs on a server), so every test can call it. It keeps no state
+// between calls.
 func Migrate(t testing.TB, db *orm.DB, migrations []migrate.Migration) {
 	t.Helper()
-	migratedMu.Lock()
-	defer migratedMu.Unlock()
-	if migrated[db] {
-		return
-	}
 	if _, err := migrate.New(db, migrations).Up(context.Background()); err != nil {
 		t.Fatalf("kilntest: migrate: %v", err)
 	}
-	migrated[db] = true
 }
 
 // Factory builds and inserts test records with sensible defaults.

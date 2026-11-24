@@ -15,7 +15,7 @@ func TestKilntest(t *testing.T) {
 	forEach(t, func(t *testing.T, db *orm.DB) {
 		users := orm.For[User](db)
 		kilntest.Migrate(t, db, migrations()) // already applied: a no-op
-		kilntest.Migrate(t, db, migrations()) // second call returns at once
+		kilntest.Migrate(t, db, migrations()) // nothing pending: still fine
 
 		factory := kilntest.NewFactory(db, func(n int) User {
 			return User{Name: fmt.Sprintf("kt %d", n), Email: fmt.Sprintf("KT-%d@test.dev", n), Age: 30}

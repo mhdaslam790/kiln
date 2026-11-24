@@ -233,23 +233,53 @@ func (db *DB) TransactionOpts(ctx context.Context, opts *sql.TxOptions, fn func(
 	if st := db.txFrom(ctx); st != nil {
 		return db.savepoint(ctx, st, fn)
 	}
-	tx, err := db.Begin(ctx, opts)
+	st, tctx, err := db.begin(ctx, opts)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if p := recover(); p != nil {
-			_ = tx.Rollback()
+			_ = st.tx.Rollback()
 			panic(p)
 		}
 	}()
-	if err = fn(tx.Context()); err != nil {
-		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+	if err = fn(tctx); err != nil {
+		if rbErr := st.tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			return errors.Join(err, rbErr)
 		}
 		return err
 	}
-	return tx.Commit()
+	return db.commit(ctx, st)
+}
+
+// begin starts a transaction and returns its state and the context that
+// carries it. Transaction uses it directly (no Tx allocation).
+func (db *DB) begin(ctx context.Context, opts *sql.TxOptions) (*txState, context.Context, error) {
+	var (
+		tx  *sql.Tx
+		err error
+	)
+	if c := db.pinned(ctx); c != nil {
+		tx, err = c.BeginTx(ctx, opts)
+	} else {
+		tx, err = db.sql.BeginTx(ctx, opts)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	st := &txState{tx: tx}
+	return st, context.WithValue(ctx, txKey{db}, st), nil
+}
+
+// commit commits st, then invalidates cached results for the tables it
+// wrote. Invalidating only after commit means concurrent readers never
+// cache rows that might still be rolled back.
+func (db *DB) commit(ctx context.Context, st *txState) error {
+	err := st.tx.Commit()
+	if err == nil && db.cache != nil {
+		_ = db.cache.bump(ctx, st.touchedTables())
+	}
+	return err
 }
 
 // Tx is a transaction started with Begin.
@@ -276,20 +306,11 @@ func (db *DB) Begin(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 	if db.txFrom(ctx) != nil {
 		return nil, ErrNestedBegin
 	}
-	var (
-		tx  *sql.Tx
-		err error
-	)
-	if c := db.pinned(ctx); c != nil {
-		tx, err = c.BeginTx(ctx, opts)
-	} else {
-		tx, err = db.sql.BeginTx(ctx, opts)
-	}
+	st, tctx, err := db.begin(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	st := &txState{tx: tx}
-	return &Tx{db: db, st: st, parent: ctx, ctx: context.WithValue(ctx, txKey{db}, st)}, nil
+	return &Tx{db: db, st: st, parent: ctx, ctx: tctx}, nil
 }
 
 // Context returns the context that carries the transaction.
@@ -297,15 +318,7 @@ func (t *Tx) Context() context.Context { return t.ctx }
 
 // Commit commits the transaction, then invalidates cached results for the
 // tables it wrote.
-func (t *Tx) Commit() error {
-	err := t.st.tx.Commit()
-	if err == nil && t.db.cache != nil {
-		// Invalidate only after commit, so concurrent readers never cache
-		// rows that might still be rolled back.
-		_ = t.db.cache.bump(t.parent, t.st.touchedTables())
-	}
-	return err
-}
+func (t *Tx) Commit() error { return t.db.commit(t.parent, t.st) }
 
 // Rollback discards the transaction. It returns sql.ErrTxDone if the
 // transaction was already committed or rolled back.
