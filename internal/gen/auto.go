@@ -411,7 +411,7 @@ func modelFromTable(pkg, name string, t *schema.TableState) string {
 		if len(st) > 0 {
 			tag += ` schema:"` + strings.Join(st, ",") + `"`
 		}
-		fields = append(fields, fmt.Sprintf("\t%s %s `%s`\n", meta.Camel(c.Name), goType, tag))
+		fields = append(fields, fmt.Sprintf("\t%s %s `%s`\n", fieldName(c.Name), goType, tag))
 	}
 	fmt.Fprintf(&b, "package %s\n\n", pkg)
 	if len(imports) > 0 {

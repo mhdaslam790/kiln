@@ -140,7 +140,18 @@ func (f *FieldSpec) PrepareForAdd() {
 }
 
 // GoName is the struct field name.
-func (f FieldSpec) GoName() string { return meta.Camel(f.Column) }
+func (f FieldSpec) GoName() string { return fieldName(f.Column) }
+
+// fieldName is the Go field name for a column. A column whose name would
+// clash with a method kiln models use (table_name -> TableName) gets a
+// "Col" suffix; its db tag keeps the real column name.
+func fieldName(column string) string {
+	n := meta.Camel(column)
+	if n == "TableName" {
+		n += "Col"
+	}
+	return n
+}
 
 // GoType is the struct field type.
 func (f FieldSpec) GoType() string {
