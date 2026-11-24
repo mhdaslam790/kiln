@@ -79,6 +79,9 @@ const (
 	ActionInsert
 	ActionUpdate
 	ActionDelete // also soft deletes
+	// ActionRaw marks raw SQL (db.Query, db.Exec, q.SQL) in Event. Plugins'
+	// BeforeQuery never sees it: raw SQL is not rewritten.
+	ActionRaw
 )
 
 func (a Action) String() string {
@@ -93,6 +96,8 @@ func (a Action) String() string {
 		return "update"
 	case ActionDelete:
 		return "delete"
+	case ActionRaw:
+		return "raw"
 	}
 	return fmt.Sprintf("Action(%d)", uint8(a))
 }

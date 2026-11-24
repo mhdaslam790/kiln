@@ -217,7 +217,7 @@ func (db *DB) selectModels(ctx context.Context, m *meta.Model, qq q.Query) (refl
 	}
 	ctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
-	rows, err := db.queryRead(ctx, st, &qq)
+	rows, err := db.queryRead(ctx, st, &qq, ActionSelect)
 	if err != nil {
 		return reflect.Value{}, err
 	}
@@ -281,7 +281,7 @@ func (db *DB) count(ctx context.Context, qq q.Query) (int64, error) {
 	}
 	ctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
-	rows, err := db.queryRead(ctx, st, &qq)
+	rows, err := db.queryRead(ctx, st, &qq, ActionCount)
 	if err != nil {
 		return 0, err
 	}
@@ -305,7 +305,7 @@ func (db *DB) Select(ctx context.Context, dst any, qq q.Query) error {
 	}
 	ctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
-	rows, err := db.queryRead(ctx, st, &qq)
+	rows, err := db.queryRead(ctx, st, &qq, ActionSelect)
 	if err != nil {
 		return err
 	}
@@ -470,7 +470,7 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 	}
 	defer db.touched(ctx, m.Table)
 	if retPK && db.dialect.IDMode() == dialect.IDReturning {
-		ids, err := db.queryIDs(ctx, st)
+		ids, err := db.queryIDs(ctx, st, op{ActionInsert, m.Table})
 		if err != nil {
 			return err
 		}
@@ -481,7 +481,7 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 			}
 		}
 	} else {
-		res, err := db.execStmt(ctx, st)
+		res, err := db.execStmt(ctx, st, op{ActionInsert, m.Table})
 		if err != nil {
 			return err
 		}
@@ -504,10 +504,10 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 }
 
 // queryIDs runs an INSERT ... RETURNING statement and reads the ids.
-func (db *DB) queryIDs(ctx context.Context, st dialect.Stmt) ([]any, error) {
+func (db *DB) queryIDs(ctx context.Context, st dialect.Stmt, o op) ([]any, error) {
 	ctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
-	rows, err := db.queryStmt(ctx, st)
+	rows, err := db.queryStmt(ctx, st, o)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +655,7 @@ func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Val
 		}
 		switch {
 		case !retPK:
-			if _, err := db.execStmt(ctx, st); err != nil {
+			if _, err := db.execStmt(ctx, st, op{ActionInsert, m.Table}); err != nil {
 				return err
 			}
 		case kind == dialect.KindMySQL:
@@ -672,7 +672,7 @@ func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Val
 				return err
 			}
 		default:
-			ids, err := db.queryIDs(ctx, st)
+			ids, err := db.queryIDs(ctx, st, op{ActionInsert, m.Table})
 			if err != nil {
 				return err
 			}
@@ -768,7 +768,7 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 		return err
 	}
 	defer db.touched(ctx, m.Table)
-	res, err := db.execStmt(ctx, st)
+	res, err := db.execStmt(ctx, st, op{ActionUpdate, m.Table})
 	if err != nil {
 		return err
 	}
@@ -798,7 +798,7 @@ func (db *DB) updateAny(ctx context.Context, action Action, qq q.Query, muts []q
 		return 0, err
 	}
 	defer db.touched(ctx, qq.Table)
-	res, err := db.execStmt(ctx, st)
+	res, err := db.execStmt(ctx, st, op{action, qq.Table})
 	if err != nil {
 		return 0, err
 	}
@@ -860,7 +860,7 @@ func (db *DB) deleteRec(ctx context.Context, rec any, hard bool) error {
 			return err
 		}
 		defer db.touched(ctx, m.Table)
-		res, err := db.execStmt(ctx, st)
+		res, err := db.execStmt(ctx, st, op{ActionDelete, m.Table})
 		if err != nil {
 			return err
 		}
@@ -890,7 +890,7 @@ func (db *DB) DeleteAny(ctx context.Context, qq q.Query) (int64, error) {
 		return 0, err
 	}
 	defer db.touched(ctx, qq.Table)
-	res, err := db.execStmt(ctx, st)
+	res, err := db.execStmt(ctx, st, op{ActionDelete, qq.Table})
 	if err != nil {
 		return 0, err
 	}
@@ -913,7 +913,7 @@ func (db *DB) mysqlIDStep(ctx context.Context) (int64, error) {
 // reports only the first id; the ids of the rows of a single multi-row
 // INSERT are consecutive (step auto_increment_increment) in row order.
 func (db *DB) mysqlBulkIDs(ctx context.Context, st dialect.Stmt, m *meta.Model, part []reflect.Value, step int64) error {
-	res, err := db.execStmt(ctx, st)
+	res, err := db.execStmt(ctx, st, op{ActionInsert, m.Table})
 	if err != nil {
 		return err
 	}
@@ -935,7 +935,7 @@ func (db *DB) mysqlBulkIDs(ctx context.Context, st dialect.Stmt, m *meta.Model, 
 func (db *DB) mssqlBulkIDs(ctx context.Context, st dialect.Stmt, m *meta.Model, part []reflect.Value) error {
 	ctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
-	rows, err := db.queryStmt(ctx, st)
+	rows, err := db.queryStmt(ctx, st, op{ActionInsert, m.Table})
 	if err != nil {
 		return err
 	}

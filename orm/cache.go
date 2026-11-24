@@ -265,12 +265,12 @@ func (db *DB) cachedRead(ctx context.Context, qq *q.Query) (*cachedOpts, []strin
 }
 
 // queryCached serves a read from the cache, or runs it and stores the rows.
-func (db *DB) queryCached(ctx context.Context, s dialect.Stmt, o *cachedOpts, tables []string) (*sql.Rows, error) {
+func (db *DB) queryCached(ctx context.Context, s dialect.Stmt, co *cachedOpts, tables []string, o op) (*sql.Rows, error) {
 	c := db.cache
 	start := time.Now()
 	key, err := c.key(db.dialect.Kind(), s, tables)
 	if err != nil { // argument we cannot hash reliably
-		return db.queryReadDirect(ctx, s)
+		return db.queryReadDirect(ctx, s, o)
 	}
 	// One round trip: the tables' current versions and the entry, which
 	// records the versions it was built from. It is only valid if they
@@ -278,17 +278,17 @@ func (db *DB) queryCached(ctx context.Context, s dialect.Stmt, o *cachedOpts, ta
 	vers, b, err := c.fetch(ctx, tables, key)
 	if err != nil {
 		c.fail(ctx, err)
-		return db.queryReadDirect(ctx, s)
+		return db.queryReadDirect(ctx, s, o)
 	}
 	if b != nil {
 		if got, res, err := decodeEntry(b); err == nil && equalStrings(got, vers) {
-			db.emitCached(ctx, s, start)
+			db.emitCached(ctx, s, o, start)
 			return replay(ctx, res)
 		}
 	}
 
 	res, err := c.flight.do(key+"\x00"+strings.Join(vers, ","), func() (*cachedResult, error) {
-		rows, err := db.queryReadDirect(ctx, s)
+		rows, err := db.queryReadDirect(ctx, s, o)
 		if err != nil {
 			return nil, err
 		}
@@ -297,7 +297,7 @@ func (db *DB) queryCached(ctx context.Context, s dialect.Stmt, o *cachedOpts, ta
 			return nil, err
 		}
 		if b, err := encodeEntry(vers, res); err == nil {
-			ttl := o.ttl
+			ttl := co.ttl
 			if ttl <= 0 {
 				ttl = c.ttl
 			}
@@ -307,7 +307,7 @@ func (db *DB) queryCached(ctx context.Context, s dialect.Stmt, o *cachedOpts, ta
 	})
 	if err != nil {
 		if errors.Is(err, errFlightShared) { // the leader failed; try ourselves
-			return db.queryReadDirect(ctx, s)
+			return db.queryReadDirect(ctx, s, o)
 		}
 		return nil, err
 	}
@@ -344,11 +344,11 @@ func (c *resultCache) key(kind dialect.Kind, s dialect.Stmt, tables []string) (s
 	return c.prefix + "q:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (db *DB) emitCached(ctx context.Context, s dialect.Stmt, start time.Time) {
+func (db *DB) emitCached(ctx context.Context, s dialect.Stmt, o op, start time.Time) {
 	if len(db.hooks) == 0 {
 		return
 	}
-	e := Event{SQL: s.SQL, Args: s.Args, Duration: time.Since(start), Cached: true}
+	e := Event{SQL: s.SQL, Args: s.Args, Duration: time.Since(start), Cached: true, Table: o.table, Action: o.action}
 	for _, h := range db.hooks {
 		h(ctx, e)
 	}

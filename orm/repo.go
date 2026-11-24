@@ -261,7 +261,7 @@ func (r *Repo[T]) Restore(ctx context.Context, rec *T) error {
 		return err
 	}
 	defer r.db.touched(ctx, r.m.Table)
-	if _, err := r.db.execStmt(ctx, st); err != nil {
+	if _, err := r.db.execStmt(ctx, st, op{ActionUpdate, r.m.Table}); err != nil {
 		return err
 	}
 	v.FieldByIndex(r.m.DeletedAt.Index).SetZero()
