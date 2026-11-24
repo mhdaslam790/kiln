@@ -22,6 +22,14 @@
 // cancelled. Cache hits never touch the database and are always served.
 //
 // One breaker guards one orm.DB, including its read replicas.
+//
+// The breaker can only count queries that return. Set connect timeouts in
+// your DSN: some drivers ignore the context while opening a connection,
+// and a server that accepts connections but never answers then blocks
+// callers forever. SQL Server (go-mssqldb) needs "dial timeout" and
+// "connection timeout" (seconds; the login timeout defaults to none); for
+// PostgreSQL and MySQL the context is honoured, "connect_timeout" and
+// "timeout" add a bound of their own.
 package kilnbreaker
 
 import (

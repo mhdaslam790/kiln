@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -145,7 +146,14 @@ func TestBreaker(t *testing.T) {
 				t.Skipf("no localhost:port in %s", tg.dsnEnv)
 			}
 			proxy := newFaultProxy(t, upstream)
-			sqldb, err := sql.Open(tg.driver, hostPort.ReplaceAllString(dsn, proxy.addr))
+			dsn = hostPort.ReplaceAllString(dsn, proxy.addr)
+			if tg.name == "mssql" {
+				// go-mssqldb ignores the context while opening a connection and
+				// has no login timeout by default: without these a hung server
+				// blocks forever (see the kilnbreaker docs).
+				dsn += sep(dsn) + "dial+timeout=2&connection+timeout=2"
+			}
+			sqldb, err := sql.Open(tg.driver, dsn)
 			must(t, err)
 			t.Cleanup(func() { sqldb.Close() })
 			sqldb.SetConnMaxIdleTime(time.Minute)
@@ -256,3 +264,10 @@ func TestBreaker(t *testing.T) {
 }
 
 func fmtList(s []string) string { return "[" + join(s) + "]" }
+
+func sep(dsn string) string {
+	if strings.Contains(dsn, "?") {
+		return "&"
+	}
+	return "?"
+}

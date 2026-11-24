@@ -1225,6 +1225,11 @@ if errors.Is(err, kilnbreaker.ErrOpen) {
   connections", server starting up or shutting down. `ErrNotFound`, constraint violations,
   SQL errors and queries the caller cancelled never trip it. Customize with `IsFailure`.
 - Pair it with `WithQueryTimeout`: a hanging database then trips it too.
+- **Set connect timeouts in your DSN.** The breaker only counts queries that return. The SQL
+  Server driver ignores the context while opening a connection and has no login timeout by
+  default, so against a hung server it waits forever: add
+  `dial timeout=5&connection timeout=5` to SQL Server DSNs. (PostgreSQL and MySQL drivers honour
+  the context; `connect_timeout` / `timeout` add a bound of their own.)
 - Costs about 2ns per query while closed, with no allocations. One breaker per `orm.DB`
   (replicas included).
 
