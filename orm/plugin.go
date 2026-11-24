@@ -47,6 +47,24 @@ type ObservePlugin interface {
 	AfterQuery(ctx context.Context, e Event)
 }
 
+// AfterWritePlugin runs after kiln wrote one record: Insert (and every
+// InsertAll record), Update, Delete and HardDelete, with w.Action set to
+// ActionInsert, ActionUpdate or ActionDelete. It is not called for bulk
+// queries (UpdateAny, DeleteAny), for an insert skipped by ON CONFLICT DO
+// NOTHING, or when the write failed.
+//
+// While such a plugin is registered, kiln runs each single-record write in
+// a transaction (if it is not already in one) and calls AfterWrite inside
+// it, so writing something alongside the change (an audit entry) is atomic
+// with it: an error rolls both back. w is the WriteInfo BeforeWrite saw for
+// the same write; use w.SetValue / w.Value to pass data between the two
+// (except for InsertAll, which runs every BeforeWrite before the batch and
+// starts each record's AfterWrite with no values).
+type AfterWritePlugin interface {
+	Plugin
+	AfterWrite(ctx context.Context, w *WriteInfo) error
+}
+
 // TxPlugin runs when a top-level transaction starts (Transaction or
 // Begin; not savepoints), before your function sees the transaction. Use it
 // for per-transaction session settings, e.g. SET LOCAL / set_config for
@@ -73,6 +91,10 @@ func Use(p Plugin) Option {
 		}
 		if op, ok := p.(ObservePlugin); ok {
 			db.hooks = append(db.hooks, op.AfterQuery)
+			hooked = true
+		}
+		if ap, ok := p.(AfterWritePlugin); ok {
+			db.afterWritePlugins = append(db.afterWritePlugins, ap)
 			hooked = true
 		}
 		if tp, ok := p.(TxPlugin); ok {
@@ -145,15 +167,29 @@ type WriteInfo struct {
 	Action Action // ActionInsert or ActionUpdate
 	Table  string
 	Model  *ModelInfo
-	// Record points to the struct being written.
+	// Record points to the struct being written (or deleted).
 	Record any
 	// Fields lists the columns an update writes; nil means every column.
 	// Values set on other columns are kept on the record but not written.
 	Fields []string
 
-	m *meta.Model
-	v reflect.Value
+	m      *meta.Model
+	v      reflect.Value
+	values map[any]any // SetValue; nil until used
 }
+
+// SetValue stores val under key for the rest of this write, so a plugin's
+// AfterWrite can read what its BeforeWrite saw (e.g. old values). Use an
+// unexported key type, as with context.WithValue.
+func (w *WriteInfo) SetValue(key, val any) {
+	if w.values == nil {
+		w.values = make(map[any]any, 1)
+	}
+	w.values[key] = val
+}
+
+// Value returns the value stored by SetValue, or nil.
+func (w *WriteInfo) Value(key any) any { return w.values[key] }
 
 // Get returns the record's value for column.
 func (w *WriteInfo) Get(column string) (any, bool) {
@@ -238,15 +274,16 @@ func (db *DB) runQueryPlugins(ctx context.Context, a Action, m *meta.Model, qq q
 
 // beforeWrite runs the write plugins on one record. targets are the
 // fields an update writes, unless all is true.
-func (db *DB) beforeWrite(ctx context.Context, a Action, m *meta.Model, v reflect.Value, targets []*meta.Field, all bool) error {
-	if len(db.writePlugins) == 0 {
-		return nil
+// It returns the WriteInfo for afterWrite, nil without write plugins.
+func (db *DB) beforeWrite(ctx context.Context, a Action, m *meta.Model, v reflect.Value, targets []*meta.Field, all bool) (*WriteInfo, error) {
+	if len(db.writePlugins) == 0 && len(db.afterWritePlugins) == 0 {
+		return nil, nil
 	}
 	return db.runWritePlugins(ctx, a, m, v, targets, all)
 }
 
 // runWritePlugins is the slow path of beforeWrite.
-func (db *DB) runWritePlugins(ctx context.Context, a Action, m *meta.Model, v reflect.Value, targets []*meta.Field, all bool) error {
+func (db *DB) runWritePlugins(ctx context.Context, a Action, m *meta.Model, v reflect.Value, targets []*meta.Field, all bool) (*WriteInfo, error) {
 	var fields []string
 	if !all {
 		fields = make([]string, len(targets))
@@ -256,13 +293,13 @@ func (db *DB) runWritePlugins(ctx context.Context, a Action, m *meta.Model, v re
 	}
 	w := db.newWriteInfo(a, m)
 	w.Fields = fields
-	return db.callWritePlugins(ctx, w, v)
+	return w, db.callWritePlugins(ctx, w, v)
 }
 
 // newWriteInfo returns a WriteInfo for m, or nil without write plugins.
 // InsertAll creates one per call and reuses it for every record.
 func (db *DB) newWriteInfo(a Action, m *meta.Model) *WriteInfo {
-	if len(db.writePlugins) == 0 {
+	if len(db.writePlugins) == 0 && len(db.afterWritePlugins) == 0 {
 		return nil
 	}
 	return &WriteInfo{Action: a, Table: m.Table, Model: modelInfo(m), m: m}
@@ -271,9 +308,36 @@ func (db *DB) newWriteInfo(a Action, m *meta.Model) *WriteInfo {
 // callWritePlugins runs the write plugins on record v using w.
 func (db *DB) callWritePlugins(ctx context.Context, w *WriteInfo, v reflect.Value) error {
 	w.v, w.Record = v, v.Addr().Interface()
+	if w.values != nil {
+		clear(w.values) // InsertAll reuses w: each record starts empty
+	}
 	for _, p := range db.writePlugins {
 		if err := p.BeforeWrite(ctx, w); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// afterWrite runs the after-write plugins for record v. w is the WriteInfo
+// from beforeWrite (nil for deletes, which have no BeforeWrite).
+// Small enough to inline: without after-write plugins it is one length check.
+func (db *DB) afterWrite(ctx context.Context, w *WriteInfo, a Action, m *meta.Model, v reflect.Value) error {
+	if len(db.afterWritePlugins) == 0 {
+		return nil
+	}
+	return db.runAfterWrite(ctx, w, a, m, v)
+}
+
+// runAfterWrite is the slow path of afterWrite.
+func (db *DB) runAfterWrite(ctx context.Context, w *WriteInfo, a Action, m *meta.Model, v reflect.Value) error {
+	if w == nil {
+		w = &WriteInfo{Table: m.Table, Model: modelInfo(m), m: m}
+	}
+	w.Action, w.v, w.Record = a, v, v.Addr().Interface()
+	for _, p := range db.afterWritePlugins {
+		if err := p.AfterWrite(ctx, w); err != nil {
+			return fmt.Errorf("orm: plugin %s: %w", p.Name(), err)
 		}
 	}
 	return nil

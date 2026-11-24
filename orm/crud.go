@@ -198,7 +198,7 @@ func hasAfterHooks(t reflect.Type) bool {
 }
 
 func (db *DB) atomic(ctx context.Context, m *meta.Model, fn func(ctx context.Context) error) error {
-	if !db.InTransaction(ctx) && hasAfterHooks(m.Type) {
+	if !db.InTransaction(ctx) && (hasAfterHooks(m.Type) || len(db.afterWritePlugins) > 0) {
 		return db.Transaction(ctx, fn)
 	}
 	return fn(ctx)
@@ -453,7 +453,8 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 		}
 	}
 	db.touchCreate(m, v)
-	if err := db.beforeWrite(ctx, ActionInsert, m, v, nil, true); err != nil {
+	w, err := db.beforeWrite(ctx, ActionInsert, m, v, nil, true)
+	if err != nil {
 		return err
 	}
 	cols, vals, retPK, err := insertColumns(m, v, true)
@@ -469,12 +470,14 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 		return err
 	}
 	defer db.touched(ctx, m.Table)
+	written := true // false when ON CONFLICT DO NOTHING skipped the row
 	if retPK && db.dialect.IDMode() == dialect.IDReturning {
 		ids, err := db.queryIDs(ctx, st, op{ActionInsert, m.Table})
 		if err != nil {
 			return err
 		}
 		pk := v.FieldByIndex(m.PK.Index)
+		written = len(ids) > 0
 		if len(ids) > 0 { // zero rows: skipped by ON CONFLICT DO NOTHING
 			if err := assignPK(pk, ids[0]); err != nil {
 				return err
@@ -484,6 +487,10 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 		res, err := db.execStmt(ctx, st, op{ActionInsert, m.Table})
 		if err != nil {
 			return err
+		}
+		if ins.OnConflict != nil && len(db.afterWritePlugins) > 0 {
+			n, err := res.RowsAffected()
+			written = err != nil || n > 0
 		}
 		if retPK {
 			id, err := res.LastInsertId()
@@ -497,6 +504,11 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 	}
 	if o.cascade {
 		if err := db.cascadeChildren(ctx, m, v); err != nil {
+			return err
+		}
+	}
+	if written {
+		if err := db.afterWrite(ctx, w, ActionInsert, m, v); err != nil {
 			return err
 		}
 	}
@@ -686,6 +698,20 @@ func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Val
 			}
 		}
 	}
+	if len(db.afterWritePlugins) > 0 {
+		skipped := conflict != nil && conflict.DoNothing && m.PK != nil // rows ON CONFLICT skipped keep a zero key
+		for _, v := range items {
+			if skipped && v.FieldByIndex(m.PK.Index).IsZero() {
+				continue
+			}
+			if w.values != nil {
+				clear(w.values) // one WriteInfo for the batch: values don't survive per record
+			}
+			if err := db.afterWrite(ctx, w, ActionInsert, m, v); err != nil {
+				return err
+			}
+		}
+	}
 	for _, v := range items {
 		if err := callHook(ctx, v, hookAfterInsert); err != nil {
 			return err
@@ -743,7 +769,8 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 			targets = append(targets, m.UpdatedAt)
 		}
 	}
-	if err := db.beforeWrite(ctx, ActionUpdate, m, v, targets, len(fields) == 0); err != nil {
+	w, err := db.beforeWrite(ctx, ActionUpdate, m, v, targets, len(fields) == 0)
+	if err != nil {
 		return err
 	}
 	muts := make([]q.Mutation, 0, len(targets))
@@ -776,6 +803,9 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 		if err := checkLocked(m, v, res); err != nil {
 			return err
 		}
+	}
+	if err := db.afterWrite(ctx, w, ActionUpdate, m, v); err != nil {
+		return err
 	}
 	return callHook(ctx, v, hookAfterUpdate)
 }
@@ -871,6 +901,9 @@ func (db *DB) deleteRec(ctx context.Context, rec any, hard bool) error {
 		}
 		if soft {
 			setTime(v.FieldByIndex(m.DeletedAt.Index), now)
+		}
+		if err := db.afterWrite(ctx, nil, ActionDelete, m, v); err != nil {
+			return err
 		}
 		return callHook(ctx, v, hookAfterDelete)
 	})

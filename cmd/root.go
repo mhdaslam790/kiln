@@ -269,6 +269,27 @@ connect as a role that is not a superuser.`,
 	rlsCmd.Flags().StringVar(&to.Column, "column", "", `tenant column (default: kiln.json "tenant_column")`)
 	tenantCmd.AddCommand(rlsCmd)
 
+	// audit
+	auditCmd := &cobra.Command{
+		Use:   "audit",
+		Short: "Audit log helpers (see github.com/mhdaslam790/kiln/audit)",
+	}
+	var ao gen.AuditInitOptions
+	auditInitCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Write a migration that creates the audit log table",
+		Long: `Writes a migration creating the table the audit module records changes in:
+table, record id, action, actor, changes (JSON) and time, indexed for a
+record's history and by time. The migration is yours to edit.
+
+Then: go get github.com/mhdaslam790/kiln/audit and add audit.Plugin(...).`,
+		Example: "  kiln audit init\n  kiln audit init --table change_log",
+		Args:    cobra.NoArgs,
+		RunE:    run(func(p *gen.Project, a []string) error { return p.AuditInit(ao) }),
+	}
+	auditInitCmd.Flags().StringVar(&ao.Table, "table", "", "table name (default audit_log)")
+	auditCmd.AddCommand(auditInitCmd)
+
 	// lint
 	var lo gen.LintOptions
 	lintCmd := &cobra.Command{
@@ -334,5 +355,5 @@ The generated schema tags make 'kiln diff --db' report no changes.`,
 	seedCmd.Flags().StringVar(&seedDSN, "dsn", "", "database URL (overrides DATABASE_URL)")
 
 	rootCmd.AddCommand(initCmd, newCmd, createCmd, addColumnCmd, dropColumnCmd, renameColumnCmd, genCmd,
-		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, scaffoldCmd, pullCmd, newSeedCmd, seedCmd, tenantCmd)
+		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, scaffoldCmd, pullCmd, newSeedCmd, seedCmd, tenantCmd, auditCmd)
 }
