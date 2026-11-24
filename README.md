@@ -34,6 +34,7 @@ kiln migrate up
 - Associations: belongs-to, has-one, has-many, many-to-many; batched preloading; cascade insert.
 - Transactions in the `ctx`, nested ones as savepoints; `db.Begin` when a callback doesn't fit.
 - Soft delete, timestamps, lifecycle hooks, change tracking, upserts, composite keys.
+- Optimistic locking with one tag (`db:"version,lock"`): concurrent edits can't overwrite each other.
 - Offset pagination with totals, keyset (cursor) pagination in both directions, streaming with `Each`.
 - Read replicas, a pinned connection when you need session state, portable constraint errors.
 - A default query timeout, so one stuck query can't exhaust the connection pool.
@@ -659,6 +660,35 @@ users.UpdateChanged(ctx, &u, cs) // UPDATE users SET name = $1, updated_at = $2 
 
 Without changes, `UpdateChanged` sends no query at all. After a successful update, the
 snapshot is reset.
+
+### Optimistic locking
+
+Two people open the same record, both edit it, and the second save silently overwrites the
+first. Tag an integer field with `lock` and kiln refuses that second save:
+
+```go
+type Doc struct {
+	ID      int64
+	Body    string
+	Version int `db:"version,lock"`
+}
+
+err := docs.Update(ctx, &doc) // UPDATE docs SET ..., version = version + 1 WHERE id = ? AND version = ?
+if errors.Is(err, orm.ErrStale) {
+	// someone saved first: reload and reapply, or tell the user
+}
+```
+
+- `Insert` starts the version at 1; each successful `Update` and `Delete` (soft or hard) bumps
+  it in the database and in your struct, so the next save works without a reload.
+- Partial updates (`Update(ctx, &doc, "Body")`) are checked too. The version itself is never
+  written from the struct: it only ever increases by one.
+- On `ErrStale` nothing was written and the struct is unchanged.
+- Bulk calls (`UpdateAny`, `DeleteAny`, `InsertAll` conflict updates) are explicit queries and
+  are not version-checked.
+- No database locks are held. Models without a `lock` field are not affected.
+
+Adding it to an existing table: `s.AddColumn("docs", "version", schema.Int, schema.Required(), schema.Default(0))`.
 
 ### Composite primary keys
 

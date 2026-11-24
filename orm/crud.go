@@ -328,6 +328,40 @@ func (db *DB) touchCreate(m *meta.Model, v reflect.Value) {
 			}
 		}
 	}
+	if m.Version != nil {
+		if fv := v.FieldByIndex(m.Version.Index); fv.IsZero() {
+			bumpVersion(fv) // new records start at version 1
+		}
+	}
+}
+
+// lockFilter adds the optimistic-lock condition (version = the value the
+// record was read with) to where, and returns the SET that bumps it.
+func lockFilter(m *meta.Model, v reflect.Value, where q.Filter) (q.Filter, q.Mutation) {
+	cur := v.FieldByIndex(m.Version.Index).Interface()
+	return q.And(where, q.Eq(m.Version.Column, cur)), q.Inc(m.Version.Column, 1)
+}
+
+// checkLocked turns "no row matched" into ErrStale for a lock model and
+// otherwise advances the record's version to match the row.
+func checkLocked(m *meta.Model, v reflect.Value, res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrStale
+	}
+	bumpVersion(v.FieldByIndex(m.Version.Index))
+	return nil
+}
+
+func bumpVersion(fv reflect.Value) {
+	if fv.CanInt() {
+		fv.SetInt(fv.Int() + 1)
+	} else {
+		fv.SetUint(fv.Uint() + 1)
+	}
 }
 
 func insertColumns(m *meta.Model, v reflect.Value, omitEmpty bool) (cols []string, vals []any, returnPK bool, err error) {
@@ -687,7 +721,7 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 	var targets []*meta.Field
 	if len(fields) == 0 {
 		for _, f := range m.Fields {
-			if isPK(m, f) || f == m.CreatedAt || f.ReadOnly {
+			if isPK(m, f) || f == m.CreatedAt || f.ReadOnly || f == m.Version {
 				continue
 			}
 			targets = append(targets, f)
@@ -699,8 +733,8 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 			if f == nil {
 				return fmt.Errorf("orm: %s has no field %q", m.Type.Name(), name)
 			}
-			if f.ReadOnly || seen[f] {
-				continue
+			if f.ReadOnly || seen[f] || f == m.Version {
+				continue // the version is managed by the lock
 			}
 			seen[f] = true
 			targets = append(targets, f)
@@ -720,6 +754,11 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 		}
 		muts = append(muts, q.Set(f.Column, val))
 	}
+	if m.Version != nil {
+		var inc q.Mutation
+		where, inc = lockFilter(m, v, where)
+		muts = append(muts, inc)
+	}
 	qq := q.Query{Table: m.Table, WhereCond: where}
 	if qq, muts, err = db.beforeQuery(ctx, ActionUpdate, m, qq, muts); err != nil {
 		return err
@@ -729,8 +768,14 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 		return err
 	}
 	defer db.touched(ctx, m.Table)
-	if _, err := db.execStmt(ctx, st); err != nil {
+	res, err := db.execStmt(ctx, st)
+	if err != nil {
 		return err
+	}
+	if m.Version != nil {
+		if err := checkLocked(m, v, res); err != nil {
+			return err
+		}
 	}
 	return callHook(ctx, v, hookAfterUpdate)
 }
@@ -795,15 +840,19 @@ func (db *DB) deleteRec(ctx context.Context, rec any, hard bool) error {
 		if soft {
 			set = []q.Mutation{q.Set(m.DeletedAt.Column, now)}
 		}
+		if m.Version != nil {
+			var inc q.Mutation
+			where, inc = lockFilter(m, v, where)
+			if soft {
+				set = append(set, inc)
+			}
+		}
 		qq := q.Query{Table: m.Table, WhereCond: where}
 		if qq, set, err = db.beforeQuery(ctx, ActionDelete, m, qq, set); err != nil {
 			return err
 		}
 		if soft {
 			st, err = db.dialect.Update(m.Table, set, qq.WhereCond)
-			if err == nil {
-				setTime(v.FieldByIndex(m.DeletedAt.Index), now)
-			}
 		} else {
 			st, err = db.dialect.Delete(m.Table, qq.WhereCond)
 		}
@@ -811,8 +860,17 @@ func (db *DB) deleteRec(ctx context.Context, rec any, hard bool) error {
 			return err
 		}
 		defer db.touched(ctx, m.Table)
-		if _, err := db.execStmt(ctx, st); err != nil {
+		res, err := db.execStmt(ctx, st)
+		if err != nil {
 			return err
+		}
+		if m.Version != nil {
+			if err := checkLocked(m, v, res); err != nil {
+				return err
+			}
+		}
+		if soft {
+			setTime(v.FieldByIndex(m.DeletedAt.Index), now)
 		}
 		return callHook(ctx, v, hookAfterDelete)
 	})

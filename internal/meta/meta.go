@@ -31,6 +31,7 @@ type Field struct {
 	JSON      bool // marshal to/from JSON
 	ReadOnly  bool // never written
 	NoAuto    bool // integer primary key that is NOT auto-generated
+	Lock      bool // optimistic-lock version column (`db:"version,lock"`)
 	// Schema holds the raw `schema:"..."` tag used by migration diffs.
 	Schema string
 }
@@ -81,6 +82,8 @@ type Model struct {
 	CreatedAt *Field
 	UpdatedAt *Field
 	DeletedAt *Field
+	// Version is the optimistic-lock field (tag option "lock"), or nil.
+	Version *Field
 
 	byCol  map[string]*Field
 	byName map[string]*Field
@@ -144,6 +147,18 @@ func Of(t reflect.Type) (*Model, error) {
 			return nil, fmt.Errorf("orm: %s.%s: deleted_at must be *time.Time or sql.NullTime", t.Name(), f.Name)
 		}
 		m.DeletedAt = f
+	}
+	for _, f := range m.Fields {
+		if !f.Lock {
+			continue
+		}
+		if m.Version != nil {
+			return nil, fmt.Errorf("orm: %s: fields %s and %s are both tagged lock", t.Name(), m.Version.Name, f.Name)
+		}
+		if !isInteger(f.Type) || f.Primary || f.ReadOnly {
+			return nil, fmt.Errorf("orm: %s.%s: a lock field must be a plain integer column", t.Name(), f.Name)
+		}
+		m.Version = f
 	}
 	v, _ := cache.LoadOrStore(t, m)
 	byTable.LoadOrStore(m.Table, v)
@@ -223,6 +238,7 @@ func (m *Model) collect(t reflect.Type, parent []int) error {
 			JSON:      opts["json"],
 			ReadOnly:  opts["readonly"],
 			NoAuto:    opts["noauto"],
+			Lock:      opts["lock"],
 			Schema:    sf.Tag.Get("schema"),
 		}
 		if prev, dup := m.byCol[name]; dup {
