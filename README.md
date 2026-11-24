@@ -344,6 +344,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `seed` | Ordered, named seeders, each run in a transaction. |
 | `cache` | Storage for the query result cache: the `Store` interface and the in-memory LRU. Redis lives in the separate module `cache/rediscache`. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
+| `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. |
 
 **Key mechanisms**
 
@@ -699,6 +700,18 @@ u, err := users.Find(ctx, q.Eq("id", 1), q.ForUpdate()) // SELECT ... FOR UPDATE
 ```
 
 Always use the `ctx` passed into `fn`. That ctx carries the transaction.
+
+When a callback doesn't fit, for example a transaction that a test helper rolls back later,
+use `Begin`. You call `Commit` or `Rollback` yourself:
+
+```go
+tx, err := db.Begin(ctx, nil)
+err = users.Insert(tx.Context(), &u) // tx.Context() carries the transaction
+err = tx.Commit()                    // or tx.Rollback()
+```
+
+`Begin` inside a transaction returns `orm.ErrNestedBegin`; use `Transaction` there to get a
+savepoint.
 
 ---
 
@@ -1169,14 +1182,62 @@ There is an `Expect…` method for every repository method. Expectations can be 
 `Maybe()` and `Always()`. Pass `ormtest.Any` to accept any query. When a call matches no
 expectation, the failure message shows the SQL the call would have run.
 
-### Integration tests
+### Integration tests with `kilntest`
+
+`kilntest` runs each test in a transaction that is rolled back when the test ends. Tests
+never see each other's rows and need no cleanup. Factories create records with defaults:
+
+```go
+import "github.com/mhdaslam790/kiln/kilntest"
+
+var (
+	db    *orm.DB
+	users *kilntest.Factory[domain.User]
+)
+
+func TestMain(m *testing.M) {
+	db = openTestDB() // your *orm.DB for tests
+	users = kilntest.NewFactory(db, func(n int) domain.User {
+		return domain.User{Name: "User", Email: fmt.Sprintf("u%d@test.dev", n)}
+	})
+	os.Exit(m.Run())
+}
+
+func TestPromote(t *testing.T) {
+	kilntest.Migrate(t, db, migrations.Set.List()) // runs once per test binary
+	ctx := kilntest.Tx(t, db)                      // rolled back when the test ends
+
+	u := users.Create(t, ctx)                                               // defaults, ID filled in
+	admin := users.Create(t, ctx, func(u *domain.User) { u.Role = "admin" }) // override fields
+	list := users.CreateMany(t, ctx, 10)                                      // one batched insert
+	draft := users.Build()                                                    // not inserted
+
+	err := svc.Promote(ctx, u.ID) // pass ctx to the code under test
+	...
+}
+```
+
+- `n` counts up from 1 in each factory, so unique columns stay unique. Share one factory
+  across tests (as above) so parallel tests never insert the same values.
+- Insert hooks run as usual. A failed `Create` fails the test.
+- Code under test that calls `db.Transaction` keeps working: inside a test it becomes a
+  savepoint, so an error still rolls back only that block.
+
+Things to know:
+
+- **Use the test's `ctx` everywhere.** A call made with a new `context.Background()` runs
+  outside the transaction. It can't see the test's rows and its writes are not rolled back.
+  With SQLite and `SetMaxOpenConns(1)` such a call waits forever for the only connection.
+- **Parallel tests** work on PostgreSQL, MySQL and SQL Server. SQLite allows one writer at a
+  time, so keep SQLite tests sequential.
+- **MySQL:** schema changes (`CREATE`, `ALTER`, ...) commit the transaction implicitly, so run
+  migrations with `kilntest.Migrate`, not inside a test transaction.
 
 A SQLite database in a temp dir is fast and needs no setup:
 
 ```go
 sqldb, _ := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "t.db")+"?_pragma=foreign_keys(1)")
 db := orm.Open(sqldb, dialect.SQLite())
-migrate.New(db, migrations.Set.List()).Up(ctx)
 ```
 
 ---
@@ -1337,6 +1398,7 @@ q/          query AST               internal/meta  struct reflection + naming
 schema/     migration DSL + State   dialect/       SQL compilers per database
 orm/        runtime                 migrate/       runner, diff, inspect, render
 seed/       seeders                 ormtest/       mocks
+kilntest/   test tx + factories
 cache/      result cache stores     cache/rediscache  Redis store (separate Go module)
 integration/  end-to-end tests (separate Go module)
 ```

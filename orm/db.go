@@ -231,36 +231,83 @@ func (db *DB) TransactionOpts(ctx context.Context, opts *sql.TxOptions, fn func(
 	if st := db.txFrom(ctx); st != nil {
 		return db.savepoint(ctx, st, fn)
 	}
-	var tx *sql.Tx
-	if c := db.pinned(ctx); c != nil {
-		tx, err = c.BeginTx(ctx, opts)
-	} else {
-		tx, err = db.sql.BeginTx(ctx, opts)
-	}
+	tx, err := db.Begin(ctx, opts)
 	if err != nil {
 		return err
 	}
-	st := &txState{tx: tx}
-	tctx := context.WithValue(ctx, txKey{db}, st)
 	defer func() {
 		if p := recover(); p != nil {
 			_ = tx.Rollback()
 			panic(p)
 		}
 	}()
-	if err = fn(tctx); err != nil {
+	if err = fn(tx.Context()); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			return errors.Join(err, rbErr)
 		}
 		return err
 	}
-	if err = tx.Commit(); err == nil && db.cache != nil {
+	return tx.Commit()
+}
+
+// Tx is a transaction started with Begin.
+type Tx struct {
+	db     *DB
+	st     *txState
+	parent context.Context
+	ctx    context.Context
+}
+
+// ErrNestedBegin is returned by Begin when ctx already carries a
+// transaction of the same DB. Use Transaction for nested work: it creates
+// a savepoint.
+var ErrNestedBegin = errors.New("orm: Begin called inside a transaction; use Transaction for a savepoint")
+
+// Begin starts a transaction and returns it without committing or rolling
+// back. Most code should use Transaction, which does both for you; Begin
+// is for lifetimes that do not fit a callback, such as test helpers that
+// roll back when the test ends.
+//
+// Every call made with tx.Context() runs in the transaction, including
+// Transaction (as a savepoint). Call Commit or Rollback exactly once.
+func (db *DB) Begin(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
+	if db.txFrom(ctx) != nil {
+		return nil, ErrNestedBegin
+	}
+	var (
+		tx  *sql.Tx
+		err error
+	)
+	if c := db.pinned(ctx); c != nil {
+		tx, err = c.BeginTx(ctx, opts)
+	} else {
+		tx, err = db.sql.BeginTx(ctx, opts)
+	}
+	if err != nil {
+		return nil, err
+	}
+	st := &txState{tx: tx}
+	return &Tx{db: db, st: st, parent: ctx, ctx: context.WithValue(ctx, txKey{db}, st)}, nil
+}
+
+// Context returns the context that carries the transaction.
+func (t *Tx) Context() context.Context { return t.ctx }
+
+// Commit commits the transaction, then invalidates cached results for the
+// tables it wrote.
+func (t *Tx) Commit() error {
+	err := t.st.tx.Commit()
+	if err == nil && t.db.cache != nil {
 		// Invalidate only after commit, so concurrent readers never cache
 		// rows that might still be rolled back.
-		_ = db.cache.bump(ctx, st.touchedTables())
+		_ = t.db.cache.bump(t.parent, t.st.touchedTables())
 	}
 	return err
 }
+
+// Rollback discards the transaction. It returns sql.ErrTxDone if the
+// transaction was already committed or rolled back.
+func (t *Tx) Rollback() error { return t.st.tx.Rollback() }
 
 func (db *DB) savepoint(ctx context.Context, st *txState, fn func(ctx context.Context) error) (err error) {
 	name := fmt.Sprintf("orm_sp_%d", db.spSeq.Add(1))
