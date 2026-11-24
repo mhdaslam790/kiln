@@ -39,6 +39,21 @@ type WritePlugin interface {
 	BeforeWrite(ctx context.Context, w *WriteInfo) error
 }
 
+// RoutePlugin steers reads between the primary and read replicas
+// (WithReplicas), e.g. to read your own writes despite replica lag.
+//
+// Wrote runs after every statement that may have changed data on the
+// primary and succeeded (inserts, updates, deletes, raw Exec; also inside
+// transactions). ReadPrimary runs for reads that would go to a replica;
+// true sends the read to the primary. Reads inside a transaction or with
+// UsePrimary go to the primary without asking. Both must be safe for
+// concurrent use and fast.
+type RoutePlugin interface {
+	Plugin
+	Wrote(ctx context.Context)
+	ReadPrimary(ctx context.Context) bool
+}
+
 // GuardPlugin decides whether a round trip to the database may happen,
 // e.g. a circuit breaker that fails fast while the database is down. It
 // guards every statement (model queries, raw SQL, writes; also those inside
@@ -105,6 +120,10 @@ func Use(p Plugin) Option {
 			db.writePlugins = append(db.writePlugins, wp)
 			hooked = true
 		}
+		if rp, ok := p.(RoutePlugin); ok {
+			db.routes = append(db.routes, rp)
+			hooked = true
+		}
 		if gp, ok := p.(GuardPlugin); ok {
 			db.guards = append(db.guards, gp)
 			hooked = true
@@ -122,7 +141,7 @@ func Use(p Plugin) Option {
 			hooked = true
 		}
 		if !hooked {
-			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterWrite, AfterQuery, AfterBegin, Allow/Done", p.Name()))
+			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterWrite, AfterQuery, AfterBegin, Allow/Done, Wrote/ReadPrimary", p.Name()))
 		}
 	}
 }

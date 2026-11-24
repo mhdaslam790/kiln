@@ -176,6 +176,7 @@ type DB struct {
 	dialect      dialect.Dialect
 	hooks        []func(context.Context, Event) // ObservePlugin.AfterQuery, incl. WithHook
 	guards       []GuardPlugin
+	routes       []RoutePlugin
 	queryPlugins []QueryPlugin
 	writePlugins []WritePlugin
 	txPlugins    []TxPlugin
@@ -489,6 +490,9 @@ func (db *DB) reader(ctx context.Context) conn {
 	if len(db.replicas) == 0 || ctx.Value(primaryKey{}) != nil {
 		return db.sql
 	}
+	if len(db.routes) != 0 && db.readPrimary(ctx) {
+		return db.sql
+	}
 	return db.replicas[int(db.rr.Add(1)%uint64(len(db.replicas)))]
 }
 
@@ -522,6 +526,9 @@ func (db *DB) execStmt(ctx context.Context, s dialect.Stmt, o op) (sql.Result, e
 	start := time.Now()
 	res, err := db.exec(ctx, db.conn(ctx), s)
 	db.emit(ctx, s, o, start, err)
+	if len(db.routes) != 0 && err == nil {
+		db.wrote(ctx)
+	}
 	return res, db.wrap(err)
 }
 
@@ -529,7 +536,25 @@ func (db *DB) queryStmt(ctx context.Context, s dialect.Stmt, o op) (*sql.Rows, e
 	start := time.Now()
 	rows, err := db.query(ctx, db.conn(ctx), s)
 	db.emit(ctx, s, o, start, err)
+	if len(db.routes) != 0 && err == nil && o.action != ActionSelect {
+		db.wrote(ctx)
+	}
 	return rows, db.wrap(err)
+}
+
+func (db *DB) wrote(ctx context.Context) {
+	for _, r := range db.routes {
+		r.Wrote(ctx)
+	}
+}
+
+func (db *DB) readPrimary(ctx context.Context) bool {
+	for _, r := range db.routes {
+		if r.ReadPrimary(ctx) {
+			return true
+		}
+	}
+	return false
 }
 
 // Exec runs a raw statement ('?' placeholders are rewritten for the dialect).

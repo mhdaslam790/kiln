@@ -406,6 +406,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `kilncrypt` | Column encryption with blind-index search and key rotation, its own module. |
 | `kilnmask` | Masks personal data in API responses and logs (`mask` tags), its own module. |
 | `kilnbreaker` | Circuit breaker: fail fast while the database is down, its own module. |
+| `kilnrw` | Read-your-writes with read replicas, its own module. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -1226,6 +1227,29 @@ if errors.Is(err, kilnbreaker.ErrOpen) {
 - Costs about 2ns per query while closed, with no allocations. One breaker per `orm.DB`
   (replicas included).
 
+### Read your writes (`kilnrw`)
+
+With `WithReplicas`, a user who saves and reloads can see old data because the replica is a
+few milliseconds behind. `kilnrw` (its own module, no dependencies) sends *that user's* reads
+to the primary for a short window after they write; everyone else keeps using replicas:
+
+```go
+rw := kilnrw.New(
+	kilnrw.Key(func(ctx context.Context) string { return sessionID(ctx) }), // across requests
+	kilnrw.Window(2*time.Second), // longer than your normal replica lag
+)
+db := orm.Open(primary, dialect.Postgres(), orm.WithReplicas(replica), orm.Use(rw))
+handler = kilnrw.Middleware(handler) // within a request
+```
+
+- **Within a request:** `Middleware` (or `kilnrw.Track(ctx)` in jobs) makes reads after a write
+  in the same request go to the primary.
+- **Across requests** (save → redirect → reload): `Key` identifies the user or session; writes
+  are remembered in memory, expiring after the window, with no background goroutine. With
+  several app instances, pass a shared store (`kilnrw.WithStore`, e.g. backed by Redis).
+- Every write counts: inserts, updates, deletes, `UpdateAny`, raw `Exec`, transactions.
+  `orm.UsePrimary(ctx)` still forces the primary by hand.
+
 ### Writing a plugin
 
 A plugin has a `Name` and implements any of three hooks. They run in the order the plugins
@@ -1240,6 +1264,7 @@ caller gets that error unchanged.
 | `AfterWrite(ctx, *orm.WriteInfo) error` | after each record is inserted, updated or deleted, inside the same transaction | record or react to the change (audit); `w.SetValue` / `w.Value` carry data from `BeforeWrite` |
 | `AfterBegin(ctx, *sql.Tx) error` | when a top-level transaction starts | per-transaction session settings (row-level security) |
 | `Allow(ctx) error` / `Done(ctx, err)` | around every statement and transaction start | decide whether to reach the database at all (circuit breaker) |
+| `Wrote(ctx)` / `ReadPrimary(ctx) bool` | after each successful write / before each replica read | route reads to the primary (read-your-writes) |
 
 For example, a plugin that hides rows of archived projects:
 
