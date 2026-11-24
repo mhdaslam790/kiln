@@ -3,10 +3,13 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
 
+	"github.com/mhdaslam790/kiln/audit"
 	"github.com/mhdaslam790/kiln/kilncrypt"
 	"github.com/mhdaslam790/kiln/migrate"
 	"github.com/mhdaslam790/kiln/orm"
@@ -51,10 +54,10 @@ func TestKilncrypt(t *testing.T) {
 	forEachWith(t, func(t *testing.T) []orm.Option {
 		return []orm.Option{kilncrypt.Plugin(keys, email)}
 	}, func(t *testing.T, db *orm.DB) {
-		m := migrate.New(db, append(migrations(), patientsTable))
+		m := migrate.New(db, append(migrations(), auditTable, patientsTable))
 		_, err := m.Up(ctx)
 		must(t, err)
-		t.Cleanup(func() { _, _ = m.Down(ctx, 1) })
+		t.Cleanup(func() { _, _ = m.Down(ctx, 2) })
 		patients := orm.For[Patient](db)
 
 		ann := Patient{Name: "ann", Email: kilncrypt.NewString("Ann@Clinic.io"), Diagnosis: kilncrypt.NewString("flu")}
@@ -155,6 +158,65 @@ func TestKilncrypt(t *testing.T) {
 		if _, err := got.Email.Open(onlyNew); err != nil {
 			t.Fatalf("in-memory value: %v", err) // still holds its plaintext
 		}
+
+		// Setting NULL clears the index too.
+		got.Email = kilncrypt.String{}
+		must(t, orm.For[Patient](rdb).Update(ctx, &got, "Email", "EmailIndex"))
+		must(t, db.Query(ctx, &raw, "SELECT email, email_index, diagnosis FROM patients ORDER BY id"))
+		if raw[0].Email != nil || raw[0].Index != nil {
+			t.Fatalf("NULL left %+v", raw[0])
+		}
+
+		// Rotate pages through more than one page (500 per page).
+		var many []Patient
+		for i := 0; i < 620; i++ {
+			many = append(many, Patient{Name: "bulk", Diagnosis: kilncrypt.NewString("d")})
+		}
+		for i := 0; i < len(many); i += 200 { // stay under SQL Server's 2100 parameters
+			must(t, patients.InsertAll(ctx, many[i:min(i+200, len(many))])) // old key 1
+		}
+		if n, err := kilncrypt.Rotate[Patient](ctx, rdb, newKeys); err != nil || n != 620 {
+			t.Fatalf("Rotate over pages: %d %v", n, err)
+		}
+		var stored []string
+		must(t, db.Query(ctx, &stored, "SELECT diagnosis FROM patients WHERE diagnosis IS NOT NULL"))
+		stale := 0
+		for _, v := range stored {
+			raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(v, "kc1:"))
+			if err != nil || binary.BigEndian.Uint32(raw) != 2 {
+				stale++
+			}
+		}
+		if len(stored) < 620 || stale != 0 {
+			t.Fatalf("%d values still under the old key", stale)
+		}
+
+		// With audit, the log holds ciphertext, never the plaintext.
+		t.Run("audit", func(t *testing.T) {
+			adb := orm.Open(db.SQL(), db.Dialect(), kilncrypt.Plugin(newKeys, email2), audit.Plugin())
+			ap := orm.For[Patient](adb)
+			rec := Patient{Name: "dee", Email: kilncrypt.NewString("dee@secret.io"), Diagnosis: kilncrypt.NewString("measles")}
+			must(t, ap.Insert(ctx, &rec))
+			rec.Diagnosis = kilncrypt.NewString("mumps")
+			must(t, ap.Update(ctx, &rec))
+			loaded, err := ap.FindByID(ctx, rec.ID)
+			must(t, err)
+			loaded.Name = "dee b"
+			must(t, ap.Update(ctx, &loaded)) // encrypted fields untouched: not in the diff
+			var logs []string
+			must(t, db.Query(ctx, &logs, "SELECT changes FROM audit_log ORDER BY id"))
+			if len(logs) != 3 {
+				t.Fatalf("%d audit rows", len(logs))
+			}
+			for _, l := range logs {
+				if strings.Contains(l, "dee@secret") || strings.Contains(l, "measles") || strings.Contains(l, "mumps") {
+					t.Fatalf("plaintext in audit log: %s", l)
+				}
+			}
+			if !strings.Contains(logs[1], `"diagnosis":["kc1:`) || strings.Contains(logs[2], "diagnosis") {
+				t.Fatalf("diffs: %s / %s", logs[1], logs[2])
+			}
+		})
 
 		// Without the plugin, plaintext is never written.
 		plain := orm.Open(db.SQL(), db.Dialect())
