@@ -471,6 +471,9 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 	if d.kind == KindMySQL {
 		ret = ""
 	}
+	if d.kind == KindMSSQL && ret != "" && len(ins.Rows) > 1 && len(ins.Columns) > 0 {
+		return d.mssqlMergeInsert(ins)
+	}
 
 	if len(ins.Columns) == 0 {
 		switch d.kind {
@@ -619,5 +622,46 @@ func (d *sqlDialect) Delete(table string, where q.Filter) (Stmt, error) {
 			return Stmt{}, err
 		}
 	}
+	return b.stmt(), nil
+}
+
+// mssqlMergeInsert inserts several rows and returns (position, id) pairs:
+//
+//	MERGE INTO [t] USING (VALUES (@p1, @p2, 0), (@p3, @p4, 1)) AS s ([a], [b], [kiln_pos])
+//	ON 1 = 0 WHEN NOT MATCHED THEN INSERT ([a], [b]) VALUES (s.[a], s.[b])
+//	OUTPUT s.[kiln_pos], INSERTED.[id];
+//
+// A plain INSERT ... OUTPUT does not guarantee that rows come back in
+// VALUES order; MERGE can output the source position next to the new id.
+func (d *sqlDialect) mssqlMergeInsert(ins Insert) (Stmt, error) {
+	b := d.newBuf()
+	pos := d.Quote(PositionColumn)
+	b.w("MERGE INTO ", d.Quote(ins.Table), " USING (VALUES ")
+	for r, row := range ins.Rows {
+		if len(row) != len(ins.Columns) {
+			return Stmt{}, fmt.Errorf("dialect: row %d has %d values, want %d", r, len(row), len(ins.Columns))
+		}
+		if r > 0 {
+			b.w(", ")
+		}
+		b.w("(")
+		for _, v := range row {
+			b.arg(v)
+			b.w(", ")
+		}
+		b.w(strconv.Itoa(r), ")")
+	}
+	b.w(") AS s (")
+	for _, c := range ins.Columns {
+		b.w(d.Quote(c), ", ")
+	}
+	b.w(pos, ") ON 1 = 0 WHEN NOT MATCHED THEN INSERT (", d.quoteList(ins.Columns), ") VALUES (")
+	for i, c := range ins.Columns {
+		if i > 0 {
+			b.w(", ")
+		}
+		b.w("s.", d.Quote(c))
+	}
+	b.w(") OUTPUT s.", pos, ", INSERTED.", d.Quote(ins.Returning), ";")
 	return b.stmt(), nil
 }
