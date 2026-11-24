@@ -893,6 +893,24 @@ id, ok := tenant.From(ctx)          // read it back
 - Cost: the same as writing the filter by hand, plus about 0.15 µs per query. Add an index
   that starts with the tenant column on each tenant table.
 
+**Adding tenants to an existing app.** If your tables already have an organisation column,
+use it: `tenant.Plugin("org_id")`. Otherwise, roll it out in three deploys so the app keeps
+working throughout:
+
+1. **Migration:** create `tenants`, insert your existing customer, and add the column with
+   that customer as the default. Existing rows and rows from the old code get it:
+   ```go
+   s.AddColumn("tasks", "tenant_id", schema.BigInt, schema.Required(), schema.Default(1))
+   ```
+   Add the indexes in a separate migration with `schema.Concurrently()` on PostgreSQL.
+2. **Code:** add `TenantID` to the models, `tenant.Plugin(...)` at startup and `tenant.With`
+   in your middleware. Run your tests: every path that has no tenant yet (login, admin pages,
+   jobs) fails with `ErrNoTenant`, so the failures are your to-do list. Fix each with
+   `tenant.With` or `tenant.Bypass`.
+3. **Migration:** remove the default so new rows must name their tenant:
+   `s.ChangeColumn("tasks", "tenant_id", schema.BigInt, schema.Required())`. Make unique
+   constraints per tenant where needed, e.g. `(tenant_id, email)` instead of `(email)`.
+
 ### Writing a plugin
 
 A plugin has a `Name` and implements any of three hooks. They run in the order the plugins
@@ -1096,6 +1114,10 @@ func init() {
 | Columns | `AddColumn`, `ChangeColumn`, `RenameColumn`, `DropColumn` |
 | Indexes / keys | `CreateIndex`, `CreateUniqueIndex`, `DropIndex`, `DropIndexIfExists`, `AddForeignKey`, `DropForeignKey` |
 | Escape hatches | `Exec(sql, args...)`, `Do(func)` |
+
+`ChangeColumn` describes the whole new column, the same on every database: options you leave
+out are removed. `ChangeColumn("t", "c", schema.Int, schema.Required())` drops an existing
+default; pass `schema.Default(...)` to keep one.
 
 Column types: `ID String Text SmallInt Int BigInt Float Decimal Bool DateTime Date Time
 Bytes JSON UUID`. Column options: `Required Unique Limit Precision Scale Default Primary
