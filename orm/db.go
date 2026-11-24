@@ -107,6 +107,31 @@ func UsePrimary(ctx context.Context) context.Context {
 	return context.WithValue(ctx, primaryKey{}, true)
 }
 
+// WithQueryTimeout gives every statement at most d to finish, so one stuck
+// query (a lock wait, a missing index) cannot hold a connection forever
+// and exhaust the pool. A context deadline that is earlier wins. The
+// timeout covers one statement including reading its rows; InsertAll
+// applies it to each batch. Starting a transaction is never limited: the
+// transaction lives as long as your function. A timed-out statement
+// returns an error matching context.DeadlineExceeded.
+func WithQueryTimeout(d time.Duration) Option { return func(db *DB) { db.timeout = d } }
+
+// noCancel is returned by stmtCtx when no timeout applies (no allocation).
+var noCancel context.CancelFunc = func() {}
+
+// stmtCtx returns the context for one statement: ctx with the query
+// timeout, unless there is none or ctx already ends sooner. Always call
+// the cancel function once the statement and its rows are done.
+func (db *DB) stmtCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if db.timeout <= 0 {
+		return ctx, noCancel
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= db.timeout {
+		return ctx, noCancel
+	}
+	return context.WithTimeout(ctx, db.timeout)
+}
+
 // WithClock overrides time.Now for timestamps (useful in tests).
 func WithClock(now func() time.Time) Option { return func(db *DB) { db.now = now } }
 
@@ -121,8 +146,9 @@ type DB struct {
 	spSeq        atomic.Int64
 	replicas     []*sql.DB
 	rr           atomic.Uint64
-	cache        *resultCache // nil unless WithCache
-	stmts        *stmtCache   // nil unless WithStmtCache
+	timeout      time.Duration // per statement; 0 = none (WithQueryTimeout)
+	cache        *resultCache  // nil unless WithCache
+	stmts        *stmtCache    // nil unless WithStmtCache
 }
 
 // Open wraps an existing *sql.DB.
@@ -403,6 +429,8 @@ func (db *DB) queryReadDirect(ctx context.Context, s dialect.Stmt) (*sql.Rows, e
 }
 
 func (db *DB) execStmt(ctx context.Context, s dialect.Stmt) (sql.Result, error) {
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
 	start := time.Now()
 	res, err := db.exec(ctx, db.conn(ctx), s)
 	db.emit(ctx, s, start, err)

@@ -215,6 +215,8 @@ func (db *DB) selectModels(ctx context.Context, m *meta.Model, qq q.Query) (refl
 	if err != nil {
 		return reflect.Value{}, err
 	}
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
 	rows, err := db.queryRead(ctx, st, &qq)
 	if err != nil {
 		return reflect.Value{}, err
@@ -277,6 +279,8 @@ func (db *DB) count(ctx context.Context, qq q.Query) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
 	rows, err := db.queryRead(ctx, st, &qq)
 	if err != nil {
 		return 0, err
@@ -299,6 +303,8 @@ func (db *DB) Select(ctx context.Context, dst any, qq q.Query) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
 	rows, err := db.queryRead(ctx, st, &qq)
 	if err != nil {
 		return err
@@ -430,15 +436,11 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 	}
 	defer db.touched(ctx, m.Table)
 	if retPK && db.dialect.IDMode() == dialect.IDReturning {
-		rows, err := db.queryStmt(ctx, st)
+		ids, err := db.queryIDs(ctx, st)
 		if err != nil {
 			return err
 		}
 		pk := v.FieldByIndex(m.PK.Index)
-		var ids []any
-		if err := scanInto(ctx, rows, &ids); err != nil {
-			return db.wrap(err)
-		}
 		if len(ids) > 0 { // zero rows: skipped by ON CONFLICT DO NOTHING
 			if err := assignPK(pk, ids[0]); err != nil {
 				return err
@@ -465,6 +467,21 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 		}
 	}
 	return callHook(ctx, v, hookAfterInsert)
+}
+
+// queryIDs runs an INSERT ... RETURNING statement and reads the ids.
+func (db *DB) queryIDs(ctx context.Context, st dialect.Stmt) ([]any, error) {
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
+	rows, err := db.queryStmt(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	var ids []any
+	if err := scanInto(ctx, rows, &ids); err != nil {
+		return nil, db.wrap(err)
+	}
+	return ids, nil
 }
 
 // assignPK converts a scanned driver value into the primary key field.
@@ -621,13 +638,9 @@ func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Val
 				return err
 			}
 		default:
-			rows, err := db.queryStmt(ctx, st)
+			ids, err := db.queryIDs(ctx, st)
 			if err != nil {
 				return err
-			}
-			var ids []any
-			if err := scanInto(ctx, rows, &ids); err != nil {
-				return db.wrap(err)
 			}
 			if len(ids) != len(part) {
 				return fmt.Errorf("orm: inserted %d rows but got %d ids", len(part), len(ids))
@@ -830,6 +843,8 @@ func (db *DB) DeleteAny(ctx context.Context, qq q.Query) (int64, error) {
 // up for multi-primary replication, e.g. Galera or group replication).
 func (db *DB) mysqlIDStep(ctx context.Context) (int64, error) {
 	var step int64
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
 	if err := db.conn(ctx).QueryRowContext(ctx, "SELECT @@auto_increment_increment").Scan(&step); err != nil {
 		return 0, db.wrap(err)
 	}
@@ -860,6 +875,8 @@ func (db *DB) mysqlBulkIDs(ctx context.Context, st dialect.Stmt, m *meta.Model, 
 // mssqlBulkIDs runs the MERGE built for a multi-row insert on SQL Server and
 // assigns ids by the position each output row carries.
 func (db *DB) mssqlBulkIDs(ctx context.Context, st dialect.Stmt, m *meta.Model, part []reflect.Value) error {
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
 	rows, err := db.queryStmt(ctx, st)
 	if err != nil {
 		return err

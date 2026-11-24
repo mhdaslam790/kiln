@@ -36,6 +36,7 @@ kiln migrate up
 - Soft delete, timestamps, lifecycle hooks, change tracking, upserts, composite keys.
 - Offset pagination with totals, keyset (cursor) pagination in both directions, streaming with `Each`.
 - Read replicas, a pinned connection when you need session state, portable constraint errors.
+- A default query timeout, so one stuck query can't exhaust the connection pool.
 - Raw SQL is always possible (`db.Query`, `db.Exec`), so the ORM never boxes you in.
 
 **Performance**
@@ -838,6 +839,7 @@ db := orm.Open(primary, dialect.Postgres(),
 		queryDuration.Observe(e.Duration.Seconds())
 	}),
 	orm.WithReplicas(replica1, replica2), // reads round-robin over replicas
+	orm.WithQueryTimeout(5*time.Second),  // no statement runs longer than this
 )
 
 u, err := users.Find(orm.UsePrimary(ctx), q.Eq("id", id)) // read your own write from the primary
@@ -849,6 +851,18 @@ db.WithConn(ctx, func(ctx context.Context) error { // pin one connection (SET, t
 
 With replicas, reads go to replicas and writes go to the primary. Anything inside a
 transaction uses the primary.
+
+**Query timeout.** One stuck query (a lock wait, a missing index) holds a connection until it
+finishes; enough of them exhaust the pool and the whole app stops. `WithQueryTimeout(d)` gives
+each statement at most `d`, including reading its rows:
+
+- an earlier deadline on `ctx` wins, so a request with 1s left is never given 5s;
+- it is per statement: a transaction may run longer, as long as each statement is quick
+  (`InsertAll` applies it per batch);
+- a timed-out call returns an error matching `context.DeadlineExceeded`, and the connection
+  goes back to the pool;
+- raw SQL through `db.Query` / `db.Exec` is covered too. Without the option nothing changes
+  and nothing is allocated.
 
 ---
 
