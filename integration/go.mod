@@ -14,6 +14,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/mhdaslam790/kiln/audit v0.0.0-00010101000000-000000000000 // indirect
+	github.com/mhdaslam790/kiln/kilncrypt v0.0.0-00010101000000-000000000000 // indirect
 )
 
 require (
@@ -43,5 +44,7 @@ require (
 replace github.com/mhdaslam790/kiln => ../
 
 replace github.com/mhdaslam790/kiln/audit => ../audit
+
+replace github.com/mhdaslam790/kiln/kilncrypt => ../kilncrypt
 
 replace github.com/mhdaslam790/kiln/cache/rediscache => ../cache/rediscache

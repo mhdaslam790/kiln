@@ -403,6 +403,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `kilnotel`, `kilnprom` | OpenTelemetry tracing and Prometheus metrics plugins, each its own module so the core needs neither. |
 | `kilnvalidate` | Validation plugin (`validate` tags), its own module. |
 | `audit` | Audit log plugin, its own module; `kiln audit init` writes its table migration. |
+| `kilncrypt` | Column encryption with blind-index search and key rotation, its own module. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -1130,6 +1131,43 @@ Every `Insert`, `InsertAll` record, `Update` and `Delete` adds one row:
   SQL and `Restore`.
 - The migration is yours: use `JSONB` for `changes` on PostgreSQL, add a tenant column, or
   partition by time.
+
+### Encrypted columns (`kilncrypt`)
+
+A separate module (`go get github.com/mhdaslam790/kiln/kilncrypt`, standard library crypto
+only) that encrypts columns in your app, so the database, backups, replicas and the query
+cache only ever hold ciphertext:
+
+```go
+keys, err := kilncrypt.NewKeys(indexKey, kilncrypt.Key{ID: 1, Secret: key1}) // 32-byte keys
+email, err := keys.Index("email", "email_index", strings.ToLower)          // optional: search
+db := orm.Open(sqlDB, dialect.Postgres(), kilncrypt.Plugin(keys, email))
+
+type Patient struct {
+	ID         int64
+	Email      kilncrypt.String // text column, AES-256-GCM
+	EmailIndex *string          // blind index column (text, 32 chars; index it)
+}
+
+p := Patient{Email: kilncrypt.NewString("ann@clinic.io")}
+patients.Insert(ctx, &p)                              // stores "kc1:..." ciphertext
+found, err := patients.Find(ctx, email.Eq("Ann@Clinic.io")) // exact match, no decryption
+plain, err := found.Email.Open(keys)                  // decrypt only where you need it
+```
+
+- **Searching encrypted data:** the blind index stores an HMAC of the normalized value (with
+  its own key) next to the ciphertext. `email.Eq(v)` / `email.In(vs...)` compare hashes, so
+  lookups use a normal database index. Exact matches only: no `LIKE`, ranges or sorting on
+  encrypted columns. Equal values have equal hashes, so don't index low-variety columns
+  (booleans, countries).
+- **Safe by default:** loaded values stay encrypted until `Open`; they print, log and marshal
+  to JSON as `"[encrypted]"`. Without the plugin, writing a `NewString` fails with
+  `ErrNotSealed` instead of storing plaintext. For `UpdateAny`, pass `keys.Seal(v)`.
+- **Key rotation:** make the new key current and keep the old one for reading, then run
+  `kilncrypt.Rotate[Patient](ctx, db, keys)` per model. It re-encrypts in pages, is safe to
+  re-run, and afterwards the old key can go. Values re-encrypt on any update too.
+- A partial `Update(ctx, &p, "Email")` must also write `"EmailIndex"`; kiln returns an error
+  rather than leave a stale index.
 
 ### Writing a plugin
 
