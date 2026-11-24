@@ -404,6 +404,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `kilnvalidate` | Validation plugin (`validate` tags), its own module. |
 | `audit` | Audit log plugin, its own module; `kiln audit init` writes its table migration. |
 | `kilncrypt` | Column encryption with blind-index search and key rotation, its own module. |
+| `kilnmask` | Masks personal data in API responses and logs (`mask` tags), its own module. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -1168,6 +1169,31 @@ plain, err := found.Email.Open(keys)                  // decrypt only where you 
   re-run, and afterwards the old key can go. Values re-encrypt on any update too.
 - A partial `Update(ctx, &p, "Email")` must also write `"EmailIndex"`; kiln returns an error
   rather than leave a stale index.
+
+### Masking personal data (`kilnmask`)
+
+A separate, dependency-free module (`go get github.com/mhdaslam790/kiln/kilnmask`) for what
+leaves your service: API responses, logs, exports. Tag fields once, mask a copy where needed:
+
+```go
+type User struct {
+	ID    int64
+	Name  string  `mask:"first:1"` // "A****"
+	Email string  `mask:"email"`   // "a****@acme.io"
+	Phone *string `mask:"last:4"`  // "****4567"
+	Token string  `mask:"full"`    // "****"
+}
+
+json.NewEncoder(w).Encode(kilnmask.Copy(u))  // u itself is untouched
+slog.Info("signup", "user", kilnmask.Log(u)) // masked only if the line is logged
+```
+
+- Rules: `full`, `email`, `first:N`, `last:N`, plus your own with
+  `kilnmask.WithRule("iban", fn)`. An unknown rule hides the whole value (fails closed).
+- The hidden part is always `****`, so the value's length doesn't leak.
+- Nested structs, pointers and slices are masked too; nothing is copied that doesn't need to be.
+- Works on any struct, not only kiln models. Pair it with `kilncrypt` for data that must also
+  be encrypted at rest.
 
 ### Writing a plugin
 
