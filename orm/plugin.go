@@ -39,6 +39,22 @@ type WritePlugin interface {
 	BeforeWrite(ctx context.Context, w *WriteInfo) error
 }
 
+// GuardPlugin decides whether a round trip to the database may happen,
+// e.g. a circuit breaker that fails fast while the database is down. It
+// guards every statement (model queries, raw SQL, writes; also those inside
+// transactions) and every transaction start, but not cache hits.
+//
+// Allow runs first; an error skips the round trip and is returned (wrapped)
+// to the caller. For every Allow that returned nil, Done reports the outcome
+// once: nil, or the error from the database. For queries, Done runs when
+// the query returns its rows, so errors while reading rows are not reported.
+// Both must be safe for concurrent use and fast: they run on every query.
+type GuardPlugin interface {
+	Plugin
+	Allow(ctx context.Context) error
+	Done(ctx context.Context, err error)
+}
+
 // ObservePlugin is told about every executed statement and every cache
 // hit, for logging, tracing and metrics. It must be safe for concurrent
 // use.
@@ -89,6 +105,10 @@ func Use(p Plugin) Option {
 			db.writePlugins = append(db.writePlugins, wp)
 			hooked = true
 		}
+		if gp, ok := p.(GuardPlugin); ok {
+			db.guards = append(db.guards, gp)
+			hooked = true
+		}
 		if op, ok := p.(ObservePlugin); ok {
 			db.hooks = append(db.hooks, op.AfterQuery)
 			hooked = true
@@ -102,7 +122,7 @@ func Use(p Plugin) Option {
 			hooked = true
 		}
 		if !hooked {
-			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterQuery, AfterBegin", p.Name()))
+			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterWrite, AfterQuery, AfterBegin, Allow/Done", p.Name()))
 		}
 	}
 }

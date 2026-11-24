@@ -175,6 +175,7 @@ type DB struct {
 	sql          *sql.DB
 	dialect      dialect.Dialect
 	hooks        []func(context.Context, Event) // ObservePlugin.AfterQuery, incl. WithHook
+	guards       []GuardPlugin
 	queryPlugins []QueryPlugin
 	writePlugins []WritePlugin
 	txPlugins    []TxPlugin
@@ -351,10 +352,18 @@ func (db *DB) begin(ctx context.Context, opts *sql.TxOptions) (*txState, context
 		tx  *sql.Tx
 		err error
 	)
+	if len(db.guards) != 0 {
+		if err := db.allow(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
 	if c := db.pinned(ctx); c != nil {
 		tx, err = c.BeginTx(ctx, opts)
 	} else {
 		tx, err = db.sql.BeginTx(ctx, opts)
+	}
+	if len(db.guards) != 0 {
+		db.done(ctx, err)
 	}
 	if err != nil {
 		return nil, nil, err

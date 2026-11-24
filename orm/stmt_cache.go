@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -126,6 +127,59 @@ func (db *DB) shouldEvict(err error) bool {
 }
 
 func (db *DB) query(ctx context.Context, c conn, s dialect.Stmt) (*sql.Rows, error) {
+	if len(db.guards) != 0 {
+		return db.guardedQuery(ctx, c, s)
+	}
+	return db.rawQuery(ctx, c, s)
+}
+
+func (db *DB) exec(ctx context.Context, c conn, s dialect.Stmt) (sql.Result, error) {
+	if len(db.guards) != 0 {
+		return db.guardedExec(ctx, c, s)
+	}
+	return db.rawExec(ctx, c, s)
+}
+
+func (db *DB) guardedQuery(ctx context.Context, c conn, s dialect.Stmt) (*sql.Rows, error) {
+	if err := db.allow(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := db.rawQuery(ctx, c, s)
+	db.done(ctx, err)
+	return rows, err
+}
+
+func (db *DB) guardedExec(ctx context.Context, c conn, s dialect.Stmt) (sql.Result, error) {
+	if err := db.allow(ctx); err != nil {
+		return nil, err
+	}
+	res, err := db.rawExec(ctx, c, s)
+	db.done(ctx, err)
+	return res, err
+}
+
+// allow asks every guard; if one refuses, the guards that allowed are told
+// the round trip did not happen (with the refusal), so they stay balanced.
+func (db *DB) allow(ctx context.Context) error {
+	for i, g := range db.guards {
+		if err := g.Allow(ctx); err != nil {
+			err = fmt.Errorf("orm: plugin %s: %w", g.Name(), err)
+			for _, prev := range db.guards[:i] {
+				prev.Done(ctx, err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) done(ctx context.Context, err error) {
+	for _, g := range db.guards {
+		g.Done(ctx, err)
+	}
+}
+
+func (db *DB) rawQuery(ctx context.Context, c conn, s dialect.Stmt) (*sql.Rows, error) {
 	if pool := db.cachedPool(c, s.SQL); pool != nil {
 		if st, err := db.stmts.get(ctx, pool, s.SQL); err == nil {
 			rows, err := st.QueryContext(ctx, s.Args...)
@@ -139,7 +193,7 @@ func (db *DB) query(ctx context.Context, c conn, s dialect.Stmt) (*sql.Rows, err
 	return c.QueryContext(ctx, s.SQL, s.Args...)
 }
 
-func (db *DB) exec(ctx context.Context, c conn, s dialect.Stmt) (sql.Result, error) {
+func (db *DB) rawExec(ctx context.Context, c conn, s dialect.Stmt) (sql.Result, error) {
 	if pool := db.cachedPool(c, s.SQL); pool != nil {
 		if st, err := db.stmts.get(ctx, pool, s.SQL); err == nil {
 			res, err := st.ExecContext(ctx, s.Args...)

@@ -405,6 +405,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `audit` | Audit log plugin, its own module; `kiln audit init` writes its table migration. |
 | `kilncrypt` | Column encryption with blind-index search and key rotation, its own module. |
 | `kilnmask` | Masks personal data in API responses and logs (`mask` tags), its own module. |
+| `kilnbreaker` | Circuit breaker: fail fast while the database is down, its own module. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -1195,6 +1196,36 @@ slog.Info("signup", "user", kilnmask.Log(u)) // masked only if the line is logge
 - Works on any struct, not only kiln models. Pair it with `kilncrypt` for data that must also
   be encrypted at rest.
 
+### Circuit breaker (`kilnbreaker`)
+
+A separate module (`go get github.com/mhdaslam790/kiln/kilnbreaker`, no dependencies). When
+the database is down or hanging, queries fail at once instead of each waiting for its
+timeout, so requests don't pile up, the pool isn't exhausted, and the database isn't flooded
+when it comes back:
+
+```go
+breaker := kilnbreaker.New(
+	kilnbreaker.Failures(5, 10*time.Second), // open after 5 failures within 10s
+	kilnbreaker.Cooldown(30*time.Second),    // then fail fast for 30s, then try one query
+	kilnbreaker.OnChange(func(from, to kilnbreaker.State) { slog.Warn("db breaker", "state", to) }),
+)
+db := orm.Open(sqlDB, dialect.Postgres(), orm.Use(breaker), orm.WithQueryTimeout(2*time.Second))
+
+if errors.Is(err, kilnbreaker.ErrOpen) {
+	http.Error(w, "try again shortly", http.StatusServiceUnavailable)
+}
+// health check: breaker.State() == kilnbreaker.Closed
+```
+
+- Guards every round trip: model queries, raw SQL, writes and transaction starts. Cache hits
+  are still served while it is open.
+- Counts only infrastructure failures: refused or lost connections, timeouts, "too many
+  connections", server starting up or shutting down. `ErrNotFound`, constraint violations,
+  SQL errors and queries the caller cancelled never trip it. Customize with `IsFailure`.
+- Pair it with `WithQueryTimeout`: a hanging database then trips it too.
+- Costs about 2ns per query while closed, with no allocations. One breaker per `orm.DB`
+  (replicas included).
+
 ### Writing a plugin
 
 A plugin has a `Name` and implements any of three hooks. They run in the order the plugins
@@ -1208,6 +1239,7 @@ caller gets that error unchanged.
 | `AfterQuery(ctx, orm.Event)` | after every statement and cache hit | observe (logging, tracing, metrics) |
 | `AfterWrite(ctx, *orm.WriteInfo) error` | after each record is inserted, updated or deleted, inside the same transaction | record or react to the change (audit); `w.SetValue` / `w.Value` carry data from `BeforeWrite` |
 | `AfterBegin(ctx, *sql.Tx) error` | when a top-level transaction starts | per-transaction session settings (row-level security) |
+| `Allow(ctx) error` / `Done(ctx, err)` | around every statement and transaction start | decide whether to reach the database at all (circuit breaker) |
 
 For example, a plugin that hides rows of archived projects:
 
