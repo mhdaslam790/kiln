@@ -31,6 +31,13 @@ import (
 // ErrNotFound is returned by Find-style methods when no row matches.
 var ErrNotFound = errors.New("orm: record not found")
 
+// ErrStale is returned by Update and Delete on a model with a lock field
+// (“Version int `db:"version,lock"` “) when the row's version is no longer
+// the one the record was read with: someone else changed or deleted it in
+// the meantime. Reload the record and apply the change again, or report a
+// conflict to the user. Nothing was written.
+var ErrStale = errors.New("orm: record was changed or deleted since it was read")
+
 // ConstraintError wraps a driver error caused by a constraint violation.
 type ConstraintError struct {
 	Kind dialect.ErrorKind

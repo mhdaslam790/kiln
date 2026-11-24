@@ -144,3 +144,33 @@ func TestManyToMany(t *testing.T) {
 		t.Error("self-referencing m2m without join columns should fail")
 	}
 }
+
+func TestLockField(t *testing.T) {
+	type Doc struct {
+		ID      int64
+		Version uint32 `db:"version,lock"`
+	}
+	m, err := Of(reflect.TypeOf(Doc{}))
+	if err != nil || m.Version == nil || m.Version.Column != "version" {
+		t.Fatalf("lock field: %v %+v", err, m)
+	}
+	type Plain struct{ ID int64 }
+	if m, _ := Of(reflect.TypeOf(Plain{})); m.Version != nil {
+		t.Fatal("no lock tag must mean no version field")
+	}
+
+	type StringLock struct {
+		ID int64
+		V  string `db:"v,lock"`
+	}
+	type TwoLocks struct {
+		ID int64
+		A  int `db:"a,lock"`
+		B  int `db:"b,lock"`
+	}
+	for _, typ := range []reflect.Type{reflect.TypeOf(StringLock{}), reflect.TypeOf(TwoLocks{})} {
+		if _, err := Of(typ); err == nil {
+			t.Errorf("%s: want an error", typ.Name())
+		}
+	}
+}
