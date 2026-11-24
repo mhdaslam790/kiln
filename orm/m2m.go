@@ -20,6 +20,8 @@ func (db *DB) m2mLinks(ctx context.Context, a *meta.Assoc, ownerKeys []any) (map
 	if err != nil {
 		return nil, nil, err
 	}
+	ctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
 	rows, err := db.queryRead(ctx, st, &qq)
 	if err != nil {
 		return nil, nil, err
@@ -129,7 +131,9 @@ func (db *DB) link(ctx context.Context, a *meta.Assoc, ownerKey any, keys []any)
 	if err != nil {
 		return err
 	}
-	rows, err := db.queryStmt(ctx, st)
+	qctx, cancel := db.stmtCtx(ctx)
+	defer cancel()
+	rows, err := db.queryStmt(qctx, st)
 	if err != nil {
 		return err
 	}
