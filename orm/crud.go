@@ -207,6 +207,10 @@ func (db *DB) atomic(ctx context.Context, m *meta.Model, fn func(ctx context.Con
 // ---- read ------------------------------------------------------------------
 
 func (db *DB) selectModels(ctx context.Context, m *meta.Model, qq q.Query) (reflect.Value, error) {
+	qq, _, err := db.beforeQuery(ctx, ActionSelect, m, qq, nil)
+	if err != nil {
+		return reflect.Value{}, err
+	}
 	st, err := db.dialect.Select(qq)
 	if err != nil {
 		return reflect.Value{}, err
@@ -265,6 +269,10 @@ func (db *DB) Count(ctx context.Context, table string, qs ...q.Querier) (int64, 
 }
 
 func (db *DB) count(ctx context.Context, qq q.Query) (int64, error) {
+	qq, _, err := db.beforeQuery(ctx, ActionCount, nil, qq, nil)
+	if err != nil {
+		return 0, err
+	}
 	st, err := db.dialect.Count(qq)
 	if err != nil {
 		return 0, err
@@ -283,6 +291,10 @@ func (db *DB) count(ctx context.Context, qq q.Query) (int64, error) {
 // Select runs an arbitrary query and scans into dst: a struct, slice of
 // structs, scalar or slice of scalars. Ideal for joins and aggregates.
 func (db *DB) Select(ctx context.Context, dst any, qq q.Query) error {
+	qq, _, err := db.beforeQuery(ctx, ActionSelect, nil, qq, nil)
+	if err != nil {
+		return err
+	}
 	st, err := db.dialect.Select(qq)
 	if err != nil {
 		return err
@@ -381,6 +393,9 @@ func (db *DB) insertOne(ctx context.Context, m *meta.Model, v reflect.Value, o i
 		}
 	}
 	db.touchCreate(m, v)
+	if err := db.beforeWrite(ctx, ActionInsert, m, v, nil); err != nil {
+		return err
+	}
 	cols, vals, retPK, err := insertColumns(m, v, true)
 	if err != nil {
 		return err
@@ -524,6 +539,9 @@ func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Val
 			return err
 		}
 		db.touchCreate(m, v)
+		if err := db.beforeWrite(ctx, ActionInsert, m, v, nil); err != nil {
+			return err
+		}
 	}
 	cols, _, retPK, err := insertColumns(m, items[0], false)
 	if err != nil {
@@ -620,7 +638,10 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 	if m.UpdatedAt != nil {
 		setTime(v.FieldByIndex(m.UpdatedAt.Index), db.now())
 	}
-	var targets []*meta.Field
+	var (
+		targets []*meta.Field
+		cols    []string // nil = every column, for plugins
+	)
 	if len(fields) == 0 {
 		for _, f := range m.Fields {
 			if isPK(m, f) || f == m.CreatedAt || f.ReadOnly {
@@ -644,6 +665,12 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 		if m.UpdatedAt != nil && !seen[m.UpdatedAt] {
 			targets = append(targets, m.UpdatedAt)
 		}
+		for _, f := range targets {
+			cols = append(cols, f.Column)
+		}
+	}
+	if err := db.beforeWrite(ctx, ActionUpdate, m, v, cols); err != nil {
+		return err
 	}
 	muts := make([]q.Mutation, 0, len(targets))
 	for _, f := range targets {
@@ -653,7 +680,11 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 		}
 		muts = append(muts, q.Set(f.Column, val))
 	}
-	st, err := db.dialect.Update(m.Table, muts, where)
+	qq := q.Query{Table: m.Table, WhereCond: where}
+	if qq, muts, err = db.beforeQuery(ctx, ActionUpdate, m, qq, muts); err != nil {
+		return err
+	}
+	st, err := db.dialect.Update(m.Table, muts, qq.WhereCond)
 	if err != nil {
 		return err
 	}
@@ -667,6 +698,16 @@ func (db *DB) updateOne(ctx context.Context, m *meta.Model, v reflect.Value, fie
 // UpdateAny applies mutations to every row matched by qq and returns the
 // number of affected rows.
 func (db *DB) UpdateAny(ctx context.Context, qq q.Query, muts ...q.Mutation) (int64, error) {
+	return db.updateAny(ctx, ActionUpdate, qq, muts)
+}
+
+// updateAny is UpdateAny reporting action to plugins (soft deletes are
+// updates in SQL but deletes to plugins).
+func (db *DB) updateAny(ctx context.Context, action Action, qq q.Query, muts []q.Mutation) (int64, error) {
+	qq, muts, err := db.beforeQuery(ctx, action, nil, qq, muts)
+	if err != nil {
+		return 0, err
+	}
 	st, err := db.dialect.Update(qq.Table, muts, qq.WhereCond)
 	if err != nil {
 		return 0, err
@@ -705,15 +746,26 @@ func (db *DB) deleteRec(ctx context.Context, rec any, hard bool) error {
 		if err := callHook(ctx, v, hookBeforeDelete); err != nil {
 			return err
 		}
-		var st dialect.Stmt
-		if m.DeletedAt != nil && !hard {
-			now := db.now()
-			st, err = db.dialect.Update(m.Table, []q.Mutation{q.Set(m.DeletedAt.Column, now)}, where)
+		var (
+			st   dialect.Stmt
+			now  = db.now()
+			soft = m.DeletedAt != nil && !hard
+			set  []q.Mutation
+		)
+		if soft {
+			set = []q.Mutation{q.Set(m.DeletedAt.Column, now)}
+		}
+		qq := q.Query{Table: m.Table, WhereCond: where}
+		if qq, set, err = db.beforeQuery(ctx, ActionDelete, m, qq, set); err != nil {
+			return err
+		}
+		if soft {
+			st, err = db.dialect.Update(m.Table, set, qq.WhereCond)
 			if err == nil {
 				setTime(v.FieldByIndex(m.DeletedAt.Index), now)
 			}
 		} else {
-			st, err = db.dialect.Delete(m.Table, where)
+			st, err = db.dialect.Delete(m.Table, qq.WhereCond)
 		}
 		if err != nil {
 			return err
@@ -730,6 +782,10 @@ func (db *DB) deleteRec(ctx context.Context, rec any, hard bool) error {
 func (db *DB) DeleteAny(ctx context.Context, qq q.Query) (int64, error) {
 	if qq.WhereCond == nil {
 		return 0, errors.New("orm: DeleteAny without a filter; use q.Expr(\"1=1\") to delete everything")
+	}
+	qq, _, err := db.beforeQuery(ctx, ActionDelete, nil, qq, nil)
+	if err != nil {
+		return 0, err
 	}
 	st, err := db.dialect.Delete(qq.Table, qq.WhereCond)
 	if err != nil {

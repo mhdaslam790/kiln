@@ -251,7 +251,12 @@ func (r *Repo[T]) Restore(ctx context.Context, rec *T) error {
 	if err != nil {
 		return err
 	}
-	st, err := r.db.dialect.Update(r.m.Table, []q.Mutation{q.Set(r.m.DeletedAt.Column, nil)}, where)
+	qq := q.Query{Table: r.m.Table, WhereCond: where}
+	qq, set, err := r.db.beforeQuery(ctx, ActionUpdate, r.m, qq, []q.Mutation{q.Set(r.m.DeletedAt.Column, nil)})
+	if err != nil {
+		return err
+	}
+	st, err := r.db.dialect.Update(r.m.Table, set, qq.WhereCond)
 	if err != nil {
 		return err
 	}
@@ -285,7 +290,7 @@ func (r *Repo[T]) UpdateAny(ctx context.Context, where q.Filter, muts ...q.Mutat
 func (r *Repo[T]) DeleteAny(ctx context.Context, where q.Filter) (int64, error) {
 	qq := r.query([]q.Querier{where})
 	if r.m.DeletedAt != nil && !qq.IsUnscoped {
-		return r.db.UpdateAny(ctx, qq, q.Set(r.m.DeletedAt.Column, r.db.now()))
+		return r.db.updateAny(ctx, ActionDelete, qq, []q.Mutation{q.Set(r.m.DeletedAt.Column, r.db.now())})
 	}
 	return r.db.DeleteAny(ctx, qq)
 }

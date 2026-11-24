@@ -70,7 +70,7 @@ type Option func(*DB)
 // cache hit). It is called from whichever goroutine ran the statement, so it
 // must be safe for concurrent use.
 func WithHook(fn func(ctx context.Context, e Event)) Option {
-	return func(db *DB) { db.hooks = append(db.hooks, fn) }
+	return Use(hookFunc(fn))
 }
 
 // WithLogger logs every statement at debug level, and statements slower
@@ -112,15 +112,17 @@ func WithClock(now func() time.Time) Option { return func(db *DB) { db.now = now
 
 // DB is the entry point of the ORM. It is safe for concurrent use.
 type DB struct {
-	sql      *sql.DB
-	dialect  dialect.Dialect
-	hooks    []func(context.Context, Event)
-	now      func() time.Time
-	spSeq    atomic.Int64
-	replicas []*sql.DB
-	rr       atomic.Uint64
-	cache    *resultCache // nil unless WithCache
-	stmts    *stmtCache   // nil unless WithStmtCache
+	sql          *sql.DB
+	dialect      dialect.Dialect
+	hooks        []func(context.Context, Event) // ObservePlugin.AfterQuery, incl. WithHook
+	queryPlugins []QueryPlugin
+	writePlugins []WritePlugin
+	now          func() time.Time
+	spSeq        atomic.Int64
+	replicas     []*sql.DB
+	rr           atomic.Uint64
+	cache        *resultCache // nil unless WithCache
+	stmts        *stmtCache   // nil unless WithStmtCache
 }
 
 // Open wraps an existing *sql.DB.

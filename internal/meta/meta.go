@@ -96,6 +96,7 @@ type Tabler interface{ TableName() string }
 
 var (
 	cache       sync.Map // reflect.Type -> *Model
+	byTable     sync.Map // table name -> *Model (first model seen for it)
 	scannerType = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
 	valuerType  = reflect.TypeOf((*driver.Valuer)(nil)).Elem()
 	timeType    = reflect.TypeOf(time.Time{})
@@ -145,7 +146,17 @@ func Of(t reflect.Type) (*Model, error) {
 		m.DeletedAt = f
 	}
 	v, _ := cache.LoadOrStore(t, m)
+	byTable.LoadOrStore(m.Table, v)
 	return v.(*Model), nil
+}
+
+// ByTable returns the metadata of a model already loaded with Of whose
+// table is table, or nil.
+func ByTable(table string) *Model {
+	if v, ok := byTable.Load(table); ok {
+		return v.(*Model)
+	}
+	return nil
 }
 
 // MustOf is Of that panics on error.

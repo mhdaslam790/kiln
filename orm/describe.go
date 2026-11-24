@@ -3,6 +3,7 @@ package orm
 import (
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/mhdaslam790/kiln/internal/meta"
 )
@@ -44,12 +45,38 @@ func Describe(model any) (ModelInfo, error) {
 	if err != nil {
 		return ModelInfo{}, err
 	}
-	info := ModelInfo{Name: m.Type.Name(), Table: m.Table, Fields: make([]FieldInfo, len(m.Fields))}
+	info := *modelInfo(m)
+	info.Fields = append([]FieldInfo(nil), info.Fields...) // callers may modify their copy
+	return info, nil
+}
+
+// Column returns the field mapped to column.
+func (mi ModelInfo) Column(column string) (FieldInfo, bool) {
+	for _, f := range mi.Fields {
+		if f.Column == column {
+			return f, true
+		}
+	}
+	return FieldInfo{}, false
+}
+
+var modelInfos sync.Map // *meta.Model -> *ModelInfo
+
+// modelInfo returns the (shared, read-only) description of m, or nil.
+func modelInfo(m *meta.Model) *ModelInfo {
+	if m == nil {
+		return nil
+	}
+	if v, ok := modelInfos.Load(m); ok {
+		return v.(*ModelInfo)
+	}
+	info := &ModelInfo{Name: m.Type.Name(), Table: m.Table, Fields: make([]FieldInfo, len(m.Fields))}
 	for i, f := range m.Fields {
 		info.Fields[i] = FieldInfo{
 			Name: f.Name, Column: f.Column, Type: f.Type,
 			Primary: f.Primary, Auto: f.Auto, JSON: f.JSON, ReadOnly: f.ReadOnly,
 		}
 	}
-	return info, nil
+	v, _ := modelInfos.LoadOrStore(m, info)
+	return v.(*ModelInfo)
 }
