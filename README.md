@@ -402,6 +402,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `cache` | Storage for the query result cache: the `Store` interface and the in-memory LRU. Redis lives in the separate module `cache/rediscache`. |
 | `kilnotel`, `kilnprom` | OpenTelemetry tracing and Prometheus metrics plugins, each its own module so the core needs neither. |
 | `kilnvalidate` | Validation plugin (`validate` tags), its own module. |
+| `audit` | Audit log plugin, its own module; `kiln audit init` writes its table migration. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -452,6 +453,7 @@ Run commands from anywhere inside your module. Paths come from `kiln.json`.
 | `kiln diff [name] [--dry-run] [--db] [--dsn url]` | Migration from model changes ([details](#auto-generated-migrations)) |
 | `kiln pull [table...] [--force] [--dsn url]` | Generate models from an existing database |
 | `kiln lint [--all] [--strict] [--dsn url] [--tenant-column col]` | Check migrations for changes that are risky in production ([details](#migration-safety-checks)) |
+| `kiln audit init [--table name]` | Write the migration for the audit log table ([details](#audit-log-audit)) |
 | `kiln tenant rls [table...] [--column col]` | Write a migration that adds PostgreSQL row-level security to tenant tables ([details](#multi-tenancy-tenant)) |
 | `kiln gen [--check]` | Typed columns for every model (`internal/domain/kiln_cols.go`) ([details](#typed-columns-compile-time-checked)) |
 | `kiln migrate [up \| down [n] \| redo \| status \| sql] [--dsn url]` | Run migrations |
@@ -1093,6 +1095,42 @@ if errors.As(err, &verr) {
   own error, for `Translate`.
 - `UpdateAny` sets values, not records, so it isn't checked.
 
+### Audit log (`audit`)
+
+A separate module that records who changed what and when, in the same transaction as the
+change. Add it when you need it:
+
+```bash
+kiln audit init                              # writes the audit_log table migration
+kiln migrate up
+go get github.com/mhdaslam790/kiln/audit
+```
+
+```go
+db := orm.Open(sqlDB, dialect.Postgres(), audit.Plugin(
+	audit.Actor(func(ctx context.Context) string { return userIDFrom(ctx) }),
+	audit.Redact("password_hash"), // recorded as "[redacted]"
+))
+```
+
+Every `Insert`, `InsertAll` record, `Update` and `Delete` adds one row:
+
+| table_name | record_id | action | actor | changes |
+|---|---|---|---|---|
+| users | 42 | insert | u_7 | `{"email": "ann@x.io", "age": 30}` |
+| users | 42 | update | u_9 | `{"age": [30, 31]}` |
+| users | 42 | delete | u_7 | `{"email": "ann@x.io", "age": 31}` |
+
+- **Atomic:** if the change rolls back, so does its entry. If writing the entry fails, the
+  change fails too.
+- Updates record only the columns that changed, as `[old, new]`; an update that changes
+  nothing records nothing. Before an update the plugin reads the current row once.
+- `audit.Skip("sessions")` leaves tables out; `audit.Table("change_log")` writes elsewhere.
+- Not recorded: `UpdateAny` / `DeleteAny` (they change rows kiln never sees as records), raw
+  SQL and `Restore`.
+- The migration is yours: use `JSONB` for `changes` on PostgreSQL, add a tenant column, or
+  partition by time.
+
 ### Writing a plugin
 
 A plugin has a `Name` and implements any of three hooks. They run in the order the plugins
@@ -1104,6 +1142,8 @@ caller gets that error unchanged.
 | `BeforeQuery(ctx, *orm.QueryInfo) error` | before every select, count, update and delete on a model table | add filters (`info.Where`), inspect or add the columns an update sets (`info.Set`) |
 | `BeforeWrite(ctx, *orm.WriteInfo) error` | for each record inserted or updated, after the model's own `Before` hooks | read and set fields (`w.Get`, `w.Set`) |
 | `AfterQuery(ctx, orm.Event)` | after every statement and cache hit | observe (logging, tracing, metrics) |
+| `AfterWrite(ctx, *orm.WriteInfo) error` | after each record is inserted, updated or deleted, inside the same transaction | record or react to the change (audit); `w.SetValue` / `w.Value` carry data from `BeforeWrite` |
+| `AfterBegin(ctx, *sql.Tx) error` | when a top-level transaction starts | per-transaction session settings (row-level security) |
 
 For example, a plugin that hides rows of archived projects:
 

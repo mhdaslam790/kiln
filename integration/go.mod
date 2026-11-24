@@ -5,7 +5,7 @@ go 1.23.2
 require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/jackc/pgx/v5 v5.7.5
-	github.com/mhdaslam790/kiln v1.0.0
+	github.com/mhdaslam790/kiln v1.7.0
 	github.com/microsoft/go-mssqldb v1.9.2
 	modernc.org/sqlite v1.38.2
 )
@@ -13,6 +13,7 @@ require (
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/mhdaslam790/kiln/audit v0.0.0-00010101000000-000000000000 // indirect
 )
 
 require (
@@ -40,5 +41,7 @@ require (
 )
 
 replace github.com/mhdaslam790/kiln => ../
+
+replace github.com/mhdaslam790/kiln/audit => ../audit
 
 replace github.com/mhdaslam790/kiln/cache/rediscache => ../cache/rediscache

@@ -178,14 +178,16 @@ type DB struct {
 	queryPlugins []QueryPlugin
 	writePlugins []WritePlugin
 	txPlugins    []TxPlugin
-	now          func() time.Time
-	spSeq        atomic.Int64
-	replicas     []*sql.DB
-	rr           atomic.Uint64
-	timeout      time.Duration // per statement; 0 = none (WithQueryTimeout)
-	cache        *resultCache  // nil unless WithCache
-	stmts        *stmtCache    // nil unless WithStmtCache
-	retries      int           // WithRetry
+	// afterWritePlugins: AfterWritePlugin; makes single-record writes transactional
+	afterWritePlugins []AfterWritePlugin
+	now               func() time.Time
+	spSeq             atomic.Int64
+	replicas          []*sql.DB
+	rr                atomic.Uint64
+	timeout           time.Duration // per statement; 0 = none (WithQueryTimeout)
+	cache             *resultCache  // nil unless WithCache
+	stmts             *stmtCache    // nil unless WithStmtCache
+	retries           int           // WithRetry
 }
 
 // Open wraps an existing *sql.DB.

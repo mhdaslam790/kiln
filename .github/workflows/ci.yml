@@ -45,6 +45,9 @@ jobs:
       - name: Validation plugin module
         working-directory: kilnvalidate
         run: go vet ./... && go test -race ./...
+      - name: Audit module (its tests run in integration, against every database)
+        working-directory: audit
+        run: go vet ./...
       - name: SQLite end-to-end
         working-directory: integration
         run: go test -race ./...
@@ -74,6 +77,7 @@ jobs:
           (cd kilnotel && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd kilnprom && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd kilnvalidate && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
+          (cd audit && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
           (cd integration && go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...)
 
   databases:
