@@ -93,4 +93,37 @@ func init() {
 	must(os.WriteFile(path, []byte(fmt.Sprintf(mig, `s.AllowUnsafe("users table is empty in every environment", "not-null-without-default")`)), 0o644))
 	log.Reset()
 	must(p.Lint(LintOptions{Strict: true}))
+
+	// Tenant tables need an index starting with the tenant column: off
+	// without a column, on with --tenant-column or kiln.json.
+	tenantMig := `package migrations
+
+import "github.com/mhdaslam790/kiln/schema"
+
+func init() {
+	Set.Add(20270102000000, "create_tasks", func(s *schema.Schema) {
+		s.CreateTable("tasks", func(t *schema.Table) {
+			t.ID("id")
+			t.BigInt("tenant_id", schema.Required())
+		})
+	}, func(s *schema.Schema) { s.DropTable("tasks") })
+}
+`
+	must(os.WriteFile(p.path("db", "migrations", "20270102000000_create_tasks.go"), []byte(tenantMig), 0o644))
+	log.Reset()
+	must(p.Lint(LintOptions{Strict: true}))
+	if strings.Contains(log.String(), "tenant-column-without-index") {
+		t.Errorf("tenant check ran without a tenant column:\n%s", log.String())
+	}
+	log.Reset()
+	if err := p.Lint(LintOptions{Strict: true, TenantColumn: "tenant_id"}); err == nil ||
+		!strings.Contains(log.String(), "WARN  tenant-column-without-index  tasks.tenant_id") {
+		t.Errorf("--tenant-column (err=%v):\n%s", err, log.String())
+	}
+	p.Config.TenantColumn = "tenant_id"
+	log.Reset()
+	must(p.Lint(LintOptions{}))
+	if !strings.Contains(log.String(), "tenant-column-without-index  tasks.tenant_id") {
+		t.Errorf("kiln.json tenant_column:\n%s", log.String())
+	}
 }

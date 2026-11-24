@@ -12,6 +12,9 @@ type LintOptions struct {
 	All    bool   // every migration, not just pending / the newest
 	Strict bool   // fail on warnings too
 	DSN    string // database URL; with one, pending migrations are checked
+	// TenantColumn overrides kiln.json's tenant_column: tables with this
+	// column must have an index starting with it.
+	TenantColumn string
 }
 
 // lintFinding mirrors migrate.Finding as decoded from the helper program.
@@ -45,6 +48,10 @@ func (p *Project) Lint(o LintOptions) error {
 	}
 	useDB := dsn != "" && !o.All
 	d := drivers[p.Config.Dialect]
+	tenantCol := o.TenantColumn
+	if tenantCol == "" {
+		tenantCol = p.Config.TenantColumn
+	}
 
 	var src strings.Builder
 	src.WriteString("package main\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"os\"\n\n")
@@ -93,6 +100,15 @@ func (p *Project) Lint(o LintOptions) error {
 	}
 	fs, err = migrate.Lint(dialect.Kind(%q), list, func(m migrate.Migration) bool { return m.Version == newest })
 `, p.Config.Dialect)
+	}
+	if tenantCol != "" {
+		// A whole-schema check: it looks at the result of every migration.
+		fmt.Fprintf(&src, `	if err == nil {
+		var tfs []migrate.Finding
+		tfs, err = migrate.LintTenantIndexes(list, %q)
+		fs = append(fs, tfs...)
+	}
+`, tenantCol)
 	}
 	src.WriteString(`	if err != nil {
 		out["error"] = err.Error()

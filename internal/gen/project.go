@@ -27,6 +27,9 @@ type Config struct {
 	// Where `kiln scaffold` writes repository implementations and usecases.
 	Repositories string `json:"repositories,omitempty"`
 	Usecases     string `json:"usecases,omitempty"`
+	// TenantColumn enables the `kiln lint` check for tenant tables without
+	// an index on this column (set it when you use the tenant plugin).
+	TenantColumn string `json:"tenant_column,omitempty"`
 }
 
 // DefaultConfig is used when no kiln.json exists.

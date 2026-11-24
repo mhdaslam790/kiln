@@ -258,16 +258,21 @@ still running during a deploy.
 With DATABASE_URL (or --dsn) it checks the migrations not yet applied;
 without one, the newest migration. --all checks every migration.
 
+With a tenant column (kiln.json "tenant_column", or --tenant-column) it
+also checks that every table with that column has an index starting with
+it; without one, each tenant query scans every tenant's rows.
+
 Errors fail the command; --strict fails on warnings too (useful in CI).
 After reviewing a finding, silence it in the migration with
   s.AllowUnsafe("why it is safe", "check-name")`,
-		Example: "  kiln lint\n  kiln lint --all --strict\n  kiln lint --dsn $DATABASE_URL",
+		Example: "  kiln lint\n  kiln lint --all --strict\n  kiln lint --dsn $DATABASE_URL\n  kiln lint --tenant-column tenant_id",
 		Args:    cobra.NoArgs,
 		RunE:    run(func(p *gen.Project, a []string) error { return p.Lint(lo) }),
 	}
 	lintCmd.Flags().BoolVar(&lo.All, "all", false, "check every migration")
 	lintCmd.Flags().BoolVar(&lo.Strict, "strict", false, "fail on warnings too")
 	lintCmd.Flags().StringVar(&lo.DSN, "dsn", "", "database URL (overrides DATABASE_URL)")
+	lintCmd.Flags().StringVar(&lo.TenantColumn, "tenant-column", "", `also check that tables with this column have an index starting with it (default: kiln.json "tenant_column")`)
 
 	// pull
 	var po gen.PullOptions
