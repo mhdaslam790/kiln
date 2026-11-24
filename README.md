@@ -32,7 +32,8 @@ kiln migrate up
 - Filters, sorting, joins, aggregates and sub-queries, with compile-time checked columns
   (`kiln gen`) or plain strings.
 - Associations: belongs-to, has-one, has-many, many-to-many; batched preloading; cascade insert.
-- Transactions in the `ctx`, nested ones as savepoints; `db.Begin` when a callback doesn't fit.
+- Transactions in the `ctx`, nested ones as savepoints; `db.Begin` when a callback doesn't fit;
+  automatic retry of deadlocks and serialization failures (`WithRetry`).
 - Soft delete, timestamps, lifecycle hooks, change tracking, upserts, composite keys.
 - Optimistic locking with one tag (`db:"version,lock"`): concurrent edits can't overwrite each other.
 - Offset pagination with totals, keyset (cursor) pagination in both directions, streaming with `Each`.
@@ -797,6 +798,24 @@ err = tx.Commit()                    // or tx.Rollback()
 
 `Begin` inside a transaction returns `orm.ErrNestedBegin`; use `Transaction` there to get a
 savepoint.
+
+**Retrying deadlocks and serialization failures.** Under load, databases abort some
+transactions on purpose (deadlocks, `SERIALIZABLE` conflicts, MySQL lock wait timeouts, a
+busy SQLite file) and expect you to run them again. `WithRetry` does that:
+
+```go
+db := orm.Open(sqlDB, dialect.Postgres(), orm.WithRetry(3))
+
+err := db.Transaction(ctx, func(ctx context.Context) error { ... }) // up to 3 more attempts
+```
+
+- The **whole** function runs again in a new transaction, never one statement inside it, so
+  keep side effects (sending email, calling other services) outside the function.
+- Waits 10ms, 20ms, 40ms ... with jitter, at most 1s; stops early when `ctx` is done.
+- Only those errors are retried. Your own errors, constraint errors and `ErrStale` come back
+  at once. Nested transactions, `db.Begin` and single statements are not retried.
+- `dialect.ErrRetryable` is the error kind it checks, if you want to retry elsewhere:
+  `db.Dialect().Classify(err) == dialect.ErrRetryable`.
 
 ---
 

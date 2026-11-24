@@ -306,6 +306,12 @@ func TestClassify(t *testing.T) {
 		k   ErrorKind
 	}{
 		{Postgres(), `ERROR: duplicate key value violates unique constraint "x" (SQLSTATE 23505)`, ErrUnique},
+		{Postgres(), `ERROR: deadlock detected (SQLSTATE 40P01)`, ErrRetryable},
+		{Postgres(), `ERROR: could not serialize access due to concurrent update (SQLSTATE 40001)`, ErrRetryable},
+		{MySQL(), "Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction", ErrRetryable},
+		{MySQL(), "Error 1205 (HY000): Lock wait timeout exceeded; try restarting transaction", ErrRetryable},
+		{SQLite(), "database is locked (5) (SQLITE_BUSY)", ErrRetryable},
+		{MSSQL(), "mssql: Transaction (Process ID 52) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.", ErrRetryable},
 		{MySQL(), "Error 1062 (23000): Duplicate entry 'a' for key 'x'", ErrUnique},
 		{SQLite(), "constraint failed: UNIQUE constraint failed: users.email (2067)", ErrUnique},
 		{SQLite(), "FOREIGN KEY constraint failed", ErrForeignKey},
