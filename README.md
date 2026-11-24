@@ -401,6 +401,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `seed` | Ordered, named seeders, each run in a transaction. |
 | `cache` | Storage for the query result cache: the `Store` interface and the in-memory LRU. Redis lives in the separate module `cache/rediscache`. |
 | `kilnotel`, `kilnprom` | OpenTelemetry tracing and Prometheus metrics plugins, each its own module so the core needs neither. |
+| `kilnvalidate` | Validation plugin (`validate` tags), its own module. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -1057,6 +1058,40 @@ Both are observers: they never change queries. When their hook isn't there, noth
 
 Your own hooks get the same information: `orm.Event` carries `Table` and `Action`
 (`orm.ActionRaw` for raw SQL) next to `SQL`, `Duration`, `Err`, `Cached` and `InTx`.
+
+### Validation (`kilnvalidate`)
+
+A separate module: `go get github.com/mhdaslam790/kiln/kilnvalidate`. It checks
+[validator](https://github.com/go-playground/validator) tags before every insert and update,
+so invalid records never reach the database:
+
+```go
+db := orm.Open(sqlDB, dialect.Postgres(), kilnvalidate.Plugin())
+
+type User struct {
+	ID    int64
+	Email string `validate:"required,email"`
+	Age   int    `validate:"gte=0,lte=130"`
+}
+
+err := users.Insert(ctx, &User{Email: "nope", Age: 200})
+// kilnvalidate: insert users: email must be a valid email address; age must be at most 130
+
+var verr *kilnvalidate.Error
+if errors.As(err, &verr) {
+	for _, f := range verr.Fields { // every invalid field at once
+		fmt.Println(f.Column, f.Tag, f.Message()) // e.g. for a 422 response
+	}
+}
+```
+
+- `errors.Is(err, kilnvalidate.ErrInvalid)` matches any validation failure.
+- Inserts (including each `InsertAll` record) and full updates check the whole record.
+  `Update(ctx, &u, "Email")` checks only the fields it writes.
+- Bring your own validator, with custom rules or translations:
+  `kilnvalidate.Plugin(kilnvalidate.WithValidator(v))`. `FieldError.Err` is the validator's
+  own error, for `Translate`.
+- `UpdateAny` sets values, not records, so it isn't checked.
 
 ### Writing a plugin
 
