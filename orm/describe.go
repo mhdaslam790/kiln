@@ -13,6 +13,8 @@ type ModelInfo struct {
 	Name   string // Go type name
 	Table  string
 	Fields []FieldInfo // mapped columns, in declaration order
+
+	byCol map[string]int // column -> index in Fields; read-only, shared by copies
 }
 
 // FieldInfo describes one mapped column.
@@ -51,7 +53,17 @@ func Describe(model any) (ModelInfo, error) {
 }
 
 // Column returns the field mapped to column.
-func (mi ModelInfo) Column(column string) (FieldInfo, bool) {
+func (mi *ModelInfo) Column(column string) (FieldInfo, bool) {
+	if mi.byCol != nil {
+		i, ok := mi.byCol[column]
+		if !ok {
+			return FieldInfo{}, false
+		}
+		if i < len(mi.Fields) && mi.Fields[i].Column == column {
+			return mi.Fields[i], true
+		}
+	}
+	// No index, or a Describe copy whose Fields the caller changed.
 	for _, f := range mi.Fields {
 		if f.Column == column {
 			return f, true
@@ -70,8 +82,9 @@ func modelInfo(m *meta.Model) *ModelInfo {
 	if v, ok := modelInfos.Load(m); ok {
 		return v.(*ModelInfo)
 	}
-	info := &ModelInfo{Name: m.Type.Name(), Table: m.Table, Fields: make([]FieldInfo, len(m.Fields))}
+	info := &ModelInfo{Name: m.Type.Name(), Table: m.Table, Fields: make([]FieldInfo, len(m.Fields)), byCol: make(map[string]int, len(m.Fields))}
 	for i, f := range m.Fields {
+		info.byCol[f.Column] = i
 		info.Fields[i] = FieldInfo{
 			Name: f.Name, Column: f.Column, Type: f.Type,
 			Primary: f.Primary, Auto: f.Auto, JSON: f.JSON, ReadOnly: f.ReadOnly,
