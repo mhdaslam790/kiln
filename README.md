@@ -450,7 +450,8 @@ Run commands from anywhere inside your module. Paths come from `kiln.json`.
 | `kiln new <name>` | Empty migration for hand-written changes or data migrations |
 | `kiln diff [name] [--dry-run] [--db] [--dsn url]` | Migration from model changes ([details](#auto-generated-migrations)) |
 | `kiln pull [table...] [--force] [--dsn url]` | Generate models from an existing database |
-| `kiln lint [--all] [--strict] [--dsn url]` | Check migrations for changes that are risky in production ([details](#migration-safety-checks)) |
+| `kiln lint [--all] [--strict] [--dsn url] [--tenant-column col]` | Check migrations for changes that are risky in production ([details](#migration-safety-checks)) |
+| `kiln tenant rls [table...] [--column col]` | Write a migration that adds PostgreSQL row-level security to tenant tables ([details](#multi-tenancy-tenant)) |
 | `kiln gen [--check]` | Typed columns for every model (`internal/domain/kiln_cols.go`) ([details](#typed-columns-compile-time-checked)) |
 | `kiln migrate [up \| down [n] \| redo \| status \| sql] [--dsn url]` | Run migrations |
 | `kiln new-seed <name>` | New seeder file |
@@ -962,6 +963,43 @@ id, ok := tenant.From(ctx)          // read it back
 - Cost: the same as writing the filter by hand, plus about 0.15 µs per query. Add an index
   that starts with the tenant column on each tenant table; with `"tenant_column": "tenant_id"`
   in `kiln.json`, `kiln lint` reports tables that lack one.
+
+**Second line of defence: PostgreSQL row-level security (optional).** The plugin filters
+the queries kiln builds. Raw SQL, or a bug in code that skips the plugin, can still reach
+other tenants' rows. With row-level security, PostgreSQL itself refuses them. Add it when
+you need it, in two steps:
+
+```bash
+kiln tenant rls          # writes a migration for every table with tenant_column
+kiln migrate up
+```
+
+```go
+db := orm.Open(sqlDB, dialect.Postgres(), tenant.Plugin("tenant_id", tenant.WithRLS()))
+```
+
+The migration is plain SQL in your project, so you can read and change it:
+
+```go
+s.Exec(`ALTER TABLE "tasks" ENABLE ROW LEVEL SECURITY`)
+s.Exec(`ALTER TABLE "tasks" FORCE ROW LEVEL SECURITY`)
+s.Exec(`CREATE POLICY kiln_tenant_isolation ON "tasks" USING (...) WITH CHECK (...)`)
+```
+
+- Each transaction tells PostgreSQL its tenant (`set_config('app.tenant_id', ..., true)`,
+  local to the transaction, so a pooled connection never carries it into the next request).
+  `tenant.Bypass` sets `app.tenant_bypass` instead.
+- Tenant work must run inside `db.Transaction`, typically one per request in your
+  middleware. A query on a tenant table outside one returns `tenant.ErrNoTransaction`. Writes
+  that kiln already wraps in its own transaction work, since that transaction gets the
+  tenant too.
+- No tenant means no rows: forgetting it fails safe.
+- Connect the app as an ordinary role. Superusers and roles with `BYPASSRLS` skip the
+  policies.
+- New tenant tables later: `kiln tenant rls invoices`. Writing the migration by hand:
+  `tenant.RLSPolicy(table, column)` returns the same statements.
+- Cost: one `set_config` per transaction, only with `WithRLS`. The plugin's own filter keeps
+  queries on the tenant index.
 
 **Adding tenants to an existing app.** If your tables already have an organisation column,
 use it: `tenant.Plugin("org_id")`. Otherwise, roll it out in three deploys so the app keeps

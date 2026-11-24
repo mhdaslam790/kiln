@@ -2,6 +2,7 @@ package orm
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 
@@ -46,6 +47,16 @@ type ObservePlugin interface {
 	AfterQuery(ctx context.Context, e Event)
 }
 
+// TxPlugin runs when a top-level transaction starts (Transaction or
+// Begin; not savepoints), before your function sees the transaction. Use it
+// for per-transaction session settings, e.g. SET LOCAL / set_config for
+// PostgreSQL row-level security. ctx is the context Transaction was called
+// with. An error rolls the transaction back and is returned to the caller.
+type TxPlugin interface {
+	Plugin
+	AfterBegin(ctx context.Context, tx *sql.Tx) error
+}
+
 // Use enables a plugin. Plugin packages usually wrap it, so users write
 // tenant.Plugin("tenant_id") rather than orm.Use(...). It panics if p
 // implements none of the hook interfaces.
@@ -64,8 +75,12 @@ func Use(p Plugin) Option {
 			db.hooks = append(db.hooks, op.AfterQuery)
 			hooked = true
 		}
+		if tp, ok := p.(TxPlugin); ok {
+			db.txPlugins = append(db.txPlugins, tp)
+			hooked = true
+		}
 		if !hooked {
-			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterQuery", p.Name()))
+			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterQuery, AfterBegin", p.Name()))
 		}
 	}
 }
