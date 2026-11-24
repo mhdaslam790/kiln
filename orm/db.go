@@ -69,6 +69,17 @@ type Event struct {
 	// Cached is true when the result came from the query cache and the
 	// database was not contacted.
 	Cached bool
+	// Table is the table the ORM call worked on ("" for raw SQL) and
+	// Action what it did (ActionRaw for db.Query, db.Exec and q.SQL). Use
+	// them to label metrics and spans without parsing SQL.
+	Table  string
+	Action Action
+}
+
+// op describes the ORM call a statement belongs to, for Event.
+type op struct {
+	action Action
+	table  string
 }
 
 // Option configures a DB.
@@ -429,11 +440,11 @@ func (db *DB) savepoint(ctx context.Context, st *txState, fn func(ctx context.Co
 	return err
 }
 
-func (db *DB) emit(ctx context.Context, s dialect.Stmt, start time.Time, err error) {
+func (db *DB) emit(ctx context.Context, s dialect.Stmt, o op, start time.Time, err error) {
 	if len(db.hooks) == 0 {
 		return
 	}
-	e := Event{SQL: s.SQL, Args: s.Args, Duration: time.Since(start), Err: err, InTx: db.InTransaction(ctx)}
+	e := Event{SQL: s.SQL, Args: s.Args, Duration: time.Since(start), Err: err, InTx: db.InTransaction(ctx), Table: o.table, Action: o.action}
 	for _, h := range db.hooks {
 		h(ctx, e)
 	}
@@ -466,33 +477,40 @@ func (db *DB) reader(ctx context.Context) conn {
 // queryRead runs a read-only statement built from qq (nil for statements
 // that do not come from a q.Query), through the result cache when the
 // context asks for it.
-func (db *DB) queryRead(ctx context.Context, s dialect.Stmt, qq *q.Query) (*sql.Rows, error) {
-	if o, tables, ok := db.cachedRead(ctx, qq); ok {
-		return db.queryCached(ctx, s, o, tables)
+func (db *DB) queryRead(ctx context.Context, s dialect.Stmt, qq *q.Query, a Action) (*sql.Rows, error) {
+	o := op{a, ""}
+	if qq != nil {
+		o.table = qq.Table
+		if qq.RawSQL != "" {
+			o = op{ActionRaw, ""}
+		}
 	}
-	return db.queryReadDirect(ctx, s)
+	if co, tables, ok := db.cachedRead(ctx, qq); ok {
+		return db.queryCached(ctx, s, co, tables, o)
+	}
+	return db.queryReadDirect(ctx, s, o)
 }
 
-func (db *DB) queryReadDirect(ctx context.Context, s dialect.Stmt) (*sql.Rows, error) {
+func (db *DB) queryReadDirect(ctx context.Context, s dialect.Stmt, o op) (*sql.Rows, error) {
 	start := time.Now()
 	rows, err := db.query(ctx, db.reader(ctx), s)
-	db.emit(ctx, s, start, err)
+	db.emit(ctx, s, o, start, err)
 	return rows, db.wrap(err)
 }
 
-func (db *DB) execStmt(ctx context.Context, s dialect.Stmt) (sql.Result, error) {
+func (db *DB) execStmt(ctx context.Context, s dialect.Stmt, o op) (sql.Result, error) {
 	ctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
 	start := time.Now()
 	res, err := db.exec(ctx, db.conn(ctx), s)
-	db.emit(ctx, s, start, err)
+	db.emit(ctx, s, o, start, err)
 	return res, db.wrap(err)
 }
 
-func (db *DB) queryStmt(ctx context.Context, s dialect.Stmt) (*sql.Rows, error) {
+func (db *DB) queryStmt(ctx context.Context, s dialect.Stmt, o op) (*sql.Rows, error) {
 	start := time.Now()
 	rows, err := db.query(ctx, db.conn(ctx), s)
-	db.emit(ctx, s, start, err)
+	db.emit(ctx, s, o, start, err)
 	return rows, db.wrap(err)
 }
 
@@ -502,7 +520,7 @@ func (db *DB) Exec(ctx context.Context, query string, args ...any) (sql.Result, 
 	if err != nil {
 		return nil, err
 	}
-	return db.execStmt(ctx, s)
+	return db.execStmt(ctx, s, op{ActionRaw, ""})
 }
 
 // Executor returns the active transaction or the pool, as a raw

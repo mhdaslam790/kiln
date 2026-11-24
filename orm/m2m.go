@@ -22,7 +22,7 @@ func (db *DB) m2mLinks(ctx context.Context, a *meta.Assoc, ownerKeys []any) (map
 	}
 	ctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
-	rows, err := db.queryRead(ctx, st, &qq)
+	rows, err := db.queryRead(ctx, st, &qq, ActionSelect)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -133,7 +133,7 @@ func (db *DB) link(ctx context.Context, a *meta.Assoc, ownerKey any, keys []any)
 	}
 	qctx, cancel := db.stmtCtx(ctx)
 	defer cancel()
-	rows, err := db.queryStmt(qctx, st)
+	rows, err := db.queryStmt(qctx, st, op{ActionSelect, a.JoinTable})
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func (db *DB) link(ctx context.Context, a *meta.Assoc, ownerKey any, keys []any)
 		return err
 	}
 	defer db.touched(ctx, a.JoinTable)
-	_, err = db.execStmt(ctx, ins)
+	_, err = db.execStmt(ctx, ins, op{ActionInsert, a.JoinTable})
 	return err
 }
 
@@ -198,6 +198,6 @@ func (db *DB) Unlink(ctx context.Context, owner any, assoc string, targets ...an
 		return err
 	}
 	defer db.touched(ctx, a.JoinTable)
-	_, err = db.execStmt(ctx, st)
+	_, err = db.execStmt(ctx, st, op{ActionDelete, a.JoinTable})
 	return err
 }
