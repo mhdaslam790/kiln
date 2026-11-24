@@ -2,6 +2,7 @@ package gen
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,8 +54,11 @@ func (p *Project) Init(cfg Config, force bool) error {
 		return err
 	}
 	p.Out("created %s", p.rel(runner))
-	p.Out("\nnext steps:\n  go get %s@latest %s\n  kiln create User name:string email:string:unique\n  DATABASE_URL=%q kiln migrate up",
-		libPath, d.Import, d.DSNExample)
+	if err := p.ensureDotEnv(d.DSNExample); err != nil {
+		return err
+	}
+	p.Out("\nnext steps:\n  go get %s@latest %s\n  edit DATABASE_URL in .env\n  kiln create User name:string email:string:unique\n  kiln migrate up",
+		libPath, d.Import)
 	if cfg.Repositories != "" {
 		p.Out("  kiln scaffold User   # optional: repository interface, kiln implementation and usecase")
 	}
@@ -330,4 +334,43 @@ func goStrings(ss []string) string {
 		q[i] = fmt.Sprintf("%q", s)
 	}
 	return "[]string{" + strings.Join(q, ", ") + "}"
+}
+
+// ensureDotEnv creates .env with an example DATABASE_URL (if there is no
+// .env yet) and makes sure .gitignore keeps it out of the repository.
+func (p *Project) ensureDotEnv(dsnExample string) error {
+	envPath := p.path(".env")
+	if _, err := os.Stat(envPath); errors.Is(err, os.ErrNotExist) {
+		content := "# Local settings for kiln and your app. Not committed (see .gitignore).\n" +
+			"# Real environment variables override these.\n" +
+			"DATABASE_URL=" + dsnExample + "\n"
+		if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
+			return err
+		}
+		p.Out("created .env")
+	}
+	ignore := p.path(".gitignore")
+	b, err := os.ReadFile(ignore)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if l = strings.TrimSpace(l); l == ".env" || l == "/.env" {
+			return nil
+		}
+	}
+	add := ".env\n"
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		add = "\n" + add
+	}
+	f, err := os.OpenFile(ignore, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(add); err != nil {
+		return err
+	}
+	p.Out("added .env to .gitignore")
+	return nil
 }
