@@ -177,6 +177,7 @@ type DB struct {
 	hooks        []func(context.Context, Event) // ObservePlugin.AfterQuery, incl. WithHook
 	queryPlugins []QueryPlugin
 	writePlugins []WritePlugin
+	txPlugins    []TxPlugin
 	now          func() time.Time
 	spSeq        atomic.Int64
 	replicas     []*sql.DB
@@ -355,6 +356,12 @@ func (db *DB) begin(ctx context.Context, opts *sql.TxOptions) (*txState, context
 	}
 	if err != nil {
 		return nil, nil, err
+	}
+	for _, p := range db.txPlugins {
+		if err := p.AfterBegin(ctx, tx); err != nil {
+			_ = tx.Rollback()
+			return nil, nil, fmt.Errorf("orm: plugin %s: %w", p.Name(), err)
+		}
 	}
 	st := &txState{tx: tx}
 	return st, context.WithValue(ctx, txKey{db}, st), nil

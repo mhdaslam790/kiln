@@ -75,3 +75,21 @@ func TestLintTenantIndexes(t *testing.T) {
 		t.Fatal("no column must mean no check")
 	}
 }
+
+func TestTenantTables(t *testing.T) {
+	h := []Migration{
+		{Version: 1, Name: "a", Up: func(s *schema.Schema) {
+			s.CreateTable("tasks", func(t *schema.Table) { t.ID("id"); t.BigInt("tenant_id") })
+			s.CreateTable("plans", func(t *schema.Table) { t.ID("id") })
+		}},
+		{Version: 2, Name: "b", Up: func(s *schema.Schema) {
+			s.CreateTable("notes", func(t *schema.Table) { t.ID("id") })
+			s.AddColumn("notes", "tenant_id", schema.BigInt)
+			s.RenameTable("tasks", "todos")
+		}},
+	}
+	got, err := TenantTables(h, "tenant_id")
+	if err != nil || strings.Join(got, ",") != "notes,todos" {
+		t.Fatalf("TenantTables = %v, %v", got, err)
+	}
+}

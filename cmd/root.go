@@ -244,6 +244,31 @@ never overwritten without --force.`,
 	}
 	scaffoldCmd.Flags().BoolVar(&so.Force, "force", false, "overwrite existing layer files")
 
+	// tenant
+	tenantCmd := &cobra.Command{
+		Use:   "tenant",
+		Short: "Multi-tenancy helpers (see the tenant package)",
+	}
+	var to gen.TenantRLSOptions
+	rlsCmd := &cobra.Command{
+		Use:   "rls [table...]",
+		Short: "Write a migration that adds PostgreSQL row-level security to tenant tables",
+		Long: `Writes a migration with plain SQL that enables PostgreSQL row-level
+security on the given tables, or on every table with the tenant column
+(kiln.json "tenant_column", or --column). The database then refuses other
+tenants' rows itself, even for raw SQL: a second line of defence behind
+the tenant plugin.
+
+Nothing changes until you apply the migration and enable it in code:
+  tenant.Plugin("tenant_id", tenant.WithRLS())
+With it, tenant work must run inside db.Transaction, and the app must
+connect as a role that is not a superuser.`,
+		Example: "  kiln tenant rls\n  kiln tenant rls projects invoices\n  kiln tenant rls --column org_id",
+		RunE:    run(func(p *gen.Project, a []string) error { return p.TenantRLS(a, to) }),
+	}
+	rlsCmd.Flags().StringVar(&to.Column, "column", "", `tenant column (default: kiln.json "tenant_column")`)
+	tenantCmd.AddCommand(rlsCmd)
+
 	// lint
 	var lo gen.LintOptions
 	lintCmd := &cobra.Command{
@@ -309,5 +334,5 @@ The generated schema tags make 'kiln diff --db' report no changes.`,
 	seedCmd.Flags().StringVar(&seedDSN, "dsn", "", "database URL (overrides DATABASE_URL)")
 
 	rootCmd.AddCommand(initCmd, newCmd, createCmd, addColumnCmd, dropColumnCmd, renameColumnCmd, genCmd,
-		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, scaffoldCmd, pullCmd, newSeedCmd, seedCmd)
+		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, scaffoldCmd, pullCmd, newSeedCmd, seedCmd, tenantCmd)
 }

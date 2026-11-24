@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/mhdaslam790/kiln/dialect"
 	"github.com/mhdaslam790/kiln/orm"
 	"github.com/mhdaslam790/kiln/q"
 )
@@ -39,6 +40,10 @@ var (
 	// ErrCrossTenant is returned when a write would put a record in, or
 	// move it to, a tenant other than the context's.
 	ErrCrossTenant = errors.New("tenant: record belongs to another tenant")
+	// ErrNoTransaction is returned with WithRLS for a query on a tenant
+	// table outside a transaction: the database only knows the tenant
+	// inside one, so the query would see no rows.
+	ErrNoTransaction = errors.New("tenant: row-level security needs a transaction; wrap the work in db.Transaction")
 )
 
 type ctxKey struct{}
@@ -71,15 +76,46 @@ func Bypass(ctx context.Context) context.Context {
 	return context.WithValue(ctx, ctxKey{}, bypass{})
 }
 
+// Option configures the plugin.
+type Option func(*plugin)
+
+// WithRLS adds PostgreSQL row-level security as a second line of defence:
+// every transaction tells the database its tenant, and policies on the
+// tenant tables (generated into your migrations by `kiln tenant rls`)
+// make PostgreSQL itself refuse other tenants' rows, even for raw SQL and
+// code paths that forget the filter.
+//
+// With RLS the database only knows the tenant inside a transaction, so
+// queries on tenant tables must run in one (typically one per request in
+// your middleware); outside one they return ErrNoTransaction. Policies do
+// not apply to superusers or roles with BYPASSRLS: connect the app as an
+// ordinary role. PostgreSQL only; Plugin panics with another dialect.
+func WithRLS() Option { return func(p *plugin) { p.rls = true } }
+
 // Plugin returns the option that enables tenant filtering on every model
 // with the given column.
-func Plugin(column string) orm.Option {
-	return orm.Use(&plugin{column: column})
+func Plugin(column string, opts ...Option) orm.Option {
+	p := &plugin{column: column}
+	for _, o := range opts {
+		o(p)
+	}
+	if !p.rls {
+		return orm.Use(p)
+	}
+	return func(db *orm.DB) {
+		if db.Dialect().Kind() != dialect.KindPostgres {
+			panic("tenant: WithRLS needs PostgreSQL, not " + string(db.Dialect().Kind()))
+		}
+		p.db = db
+		orm.Use(&rlsPlugin{p})(db)
+	}
 }
 
 type plugin struct {
 	column    string
 	qualified sync.Map // table -> "table.column"; bounded by the number of tables
+	rls       bool
+	db        *orm.DB // set with rls
 }
 
 func (p *plugin) Name() string { return "tenant" }
@@ -118,6 +154,9 @@ func (p *plugin) BeforeQuery(ctx context.Context, info *orm.QueryInfo) error {
 		return nil
 	}
 	id, bypassed, err := lookup(ctx)
+	if p.rls && !p.db.InTransaction(ctx) {
+		return fmt.Errorf("%w (%s %s)", ErrNoTransaction, info.Action, info.Table)
+	}
 	if bypassed {
 		return nil
 	}
@@ -139,6 +178,9 @@ func (p *plugin) BeforeWrite(ctx context.Context, w *orm.WriteInfo) error {
 	}
 	if w.Action == orm.ActionUpdate && w.Fields != nil && !contains(w.Fields, p.column) {
 		return nil // the column is not written
+	}
+	if p.rls && !p.db.InTransaction(ctx) {
+		return fmt.Errorf("%w (%s %s)", ErrNoTransaction, w.Action, w.Table)
 	}
 	cur, _ := w.Get(p.column)
 	id, bypassed, err := lookup(ctx)

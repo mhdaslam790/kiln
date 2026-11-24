@@ -408,3 +408,29 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// TenantTables returns, sorted, the tables that have column in the schema
+// built by every migration in history. `kiln tenant rls` uses it to find
+// the tables that need a row-level security policy.
+func TenantTables(history []Migration, column string) ([]string, error) {
+	sorted := append([]Migration(nil), history...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Version < sorted[j].Version })
+	state := schema.NewState()
+	for _, mg := range sorted {
+		var s schema.Schema
+		mg.Up(&s)
+		for _, op := range s.Ops {
+			if err := state.Apply(op); err != nil {
+				return nil, fmt.Errorf("replaying %d_%s: %w", mg.Version, mg.Name, err)
+			}
+		}
+	}
+	var out []string
+	for name, t := range state.Tables {
+		if t.Column(column) != nil {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
