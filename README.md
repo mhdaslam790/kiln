@@ -24,7 +24,53 @@ kiln diff add_post_slug                                    # migration written f
 kiln migrate up
 ```
 
+## Features
+
+**Data access**
+- Typed repositories with generics: `orm.For[User](db)` returns `Repo[User]`; no `interface{}`, no casts.
+- Plain structs as models. No base type to embed, no generated model code.
+- Filters, sorting, joins, aggregates and sub-queries, with compile-time checked columns
+  (`kiln gen`) or plain strings.
+- Associations: belongs-to, has-one, has-many, many-to-many; batched preloading; cascade insert.
+- Transactions in the `ctx`, nested ones as savepoints; `db.Begin` when a callback doesn't fit.
+- Soft delete, timestamps, lifecycle hooks, change tracking, upserts, composite keys.
+- Offset pagination with totals, keyset (cursor) pagination in both directions, streaming with `Each`.
+- Read replicas, a pinned connection when you need session state, portable constraint errors.
+- Raw SQL is always possible (`db.Query`, `db.Exec`), so the ORM never boxes you in.
+
+**Performance**
+- About 0.6 µs of overhead per query over hand-written `database/sql` code
+  ([Performance](#performance)).
+- `InsertAll` sends rows in batches on every database: 3–13× faster than one by one.
+- Optional query result cache (memory or Redis) with automatic invalidation, and a prepared
+  statement cache.
+- Features you don't use cost nothing; allocation limits are checked in CI on every change.
+
+**Migrations and tooling**
+- Migrations written for you from model changes (`kiln diff`), without a database or against
+  the live one.
+- Generators that create models and edit your structs (`kiln create`, `add-column`, ...).
+- `kiln lint` catches risky migrations (locks, data loss) before they reach production.
+- Migration lock across processes, dry-run SQL, status, redo; models from an existing
+  database (`kiln pull`); seeders.
+
+**Testing**
+- `ormtest`: typed mocks of your repositories, no database needed.
+- `kilntest`: each test runs in a transaction that is rolled back at the end, plus factories.
+
+**Extending**
+- Plugins enabled with one line (`orm.Use(...)`): add filters, set values on write, observe
+  every query. Multi-tenancy, tracing and metrics plugins are on the way.
+
+**Go-first design**
+- Built on `database/sql`; the core has no dependencies, not even drivers.
+- `ctx` first everywhere, errors you can check with `errors.Is`/`errors.As`, no panics while
+  serving requests, no global configuration.
+- Works on PostgreSQL, MySQL/MariaDB, SQLite and SQL Server; tested against all four in CI.
+
 ## Contents
+
+Start with [Features](#features), or jump in:
 
 1. [Install](#install)
 2. [Getting started](#getting-started): a project from zero to a running query
@@ -345,7 +391,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `seed` | Ordered, named seeders, each run in a transaction. |
 | `cache` | Storage for the query result cache: the `Store` interface and the in-memory LRU. Redis lives in the separate module `cache/rediscache`. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
-| `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. |
+| `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 
 **Key mechanisms**
 
@@ -1256,7 +1302,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestPromote(t *testing.T) {
-	kilntest.Migrate(t, db, migrations.Set.List()) // runs once per test binary
+	kilntest.Migrate(t, db, migrations.Set.List()) // applies pending ones; cheap when none
 	ctx := kilntest.Tx(t, db)                      // rolled back when the test ends
 
 	u := users.Create(t, ctx)                                               // defaults, ID filled in
@@ -1338,6 +1384,10 @@ An honest overview. Every tool here is good, and they make different trade-offs.
 | Built-in query cache with automatic invalidation | ✗ (plugins) | ✗ (separate package) | ✗ | ✗ | ✓ memory or Redis |
 | Migration safety checks (lint) | ✗ | ✓ through Atlas | ✗ | ✗ | ✓ `kiln lint` |
 | Typed mocks for unit tests | ✗ (sqlmock) | ✗ (real SQLite) | ✗ | `reltest` (untyped) | ✓ `ormtest` |
+| Rolled-back transaction per test + factories | ✗ | ✗ (`enttest` opens and migrates) | fixtures (`dbfixture`) | ✗ | ✓ `kilntest` |
+| Batched multi-row inserts | ✓ `CreateInBatches` | ✓ `CreateBulk` | ✓ | ✓ `InsertAll` | ✓ `InsertAll`, ids correct on all four databases |
+| Extension points | callbacks, plugins | hooks, interceptors | hooks | ✗ | one-line plugins, free when unused |
+| Allocation limits enforced in CI | ✗ | ✗ | ✗ | ✗ | ✓ |
 | SQL Server | ✓ | ✗ | ✓ | ✓ | ✓ (newest, least battle-tested) |
 | Maturity and ecosystem | very large | large | medium | small | **new** |
 
@@ -1349,8 +1399,22 @@ An honest overview. Every tool here is good, and they make different trade-offs.
 - you need the most mileage in production today: anything above. kiln is new.
 
 **Choose kiln when** you want one tool for the whole loop: plain structs, compile-checked
-queries, migrations written for you from model changes, generators, seeds, caching and mocks,
-with a dependency-free core.
+queries, migrations written for you from model changes, generators, seeds, caching, mocks and
+real-database tests, with a dependency-free core.
+
+**Why Go developers tend to like it:**
+
+- **No magic you can't see.** Everything runs through `database/sql`; every statement can be
+  logged; anything automatic (soft delete, plugins) is opt-in and shows up in that SQL.
+- **Types instead of strings and `interface{}`.** `Repo[T]` returns `T`; columns can be checked
+  at compile time; mocks are typed too.
+- **Your structs stay yours.** No embedded base model, no generated model code you can't edit.
+- **Performance is measured, not promised.** The overhead per query is published below, and
+  CI fails when a change makes common operations allocate more.
+- **Small surface, idiomatic errors.** `ctx` first, sentinel errors, savepoints for nested
+  transactions, raw SQL whenever you need it.
+- **Migrations are the strongest part.** Generated from your structs, linted for risky
+  changes, locked across processes, and the same on all four databases.
 
 ### In detail: go-rel/rel
 
@@ -1417,12 +1481,18 @@ Inserting 1,000 rows (local servers, Apple M-series):
 |---|---|---|---|---|
 | PostgreSQL | multi-row `INSERT ... RETURNING` | 35–44 ms | 6–8 ms | 5–6× |
 | MySQL / MariaDB | multi-row `INSERT`, ids from `LAST_INSERT_ID()` | 53–82 ms | 5–6 ms | 10–13× |
-| SQLite | small multi-row `INSERT ... RETURNING` (~256 values each) | 17 ms | 5.4 ms | 3× |
+| SQLite | small multi-row `INSERT ... RETURNING` (~256 values each) | 17 ms | 5.2 ms | 3.3× |
 | SQL Server | `MERGE ... OUTPUT`, up to 1,000 rows each | — | — | fewer round trips |
 
 Inserts with `Cascade()` or an `OnConflict…` option (on auto-increment ids), and records whose ids
 you set yourself on SQL Server, go row by row so every id stays correct.
 Before/after insert hooks still run for every record.
+
+**Plugins and unused features cost nothing.** With no plugins installed the numbers above are
+unchanged. With a plugin that implements every hook, `FindByID` takes about 0.1 µs and one
+allocation more, and `InsertAll` of 100 rows one allocation more (not one per row).
+`orm/alloc_guard_test.go` fixes the allocation count of common operations, and CI fails when a
+change raises it.
 
 **Why reflection rather than generated scanning code?** With the optimisations above, the
 remaining gap is a few hundred nanoseconds per query, less than any network round trip.

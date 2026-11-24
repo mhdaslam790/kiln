@@ -349,6 +349,26 @@ func insertColumns(m *meta.Model, v reflect.Value, omitEmpty bool) (cols []strin
 	return cols, vals, returnPK, nil
 }
 
+// insertValues appends v's values for the columns insertColumns(m, v,
+// false) returns, without building the column list.
+func insertValues(m *meta.Model, v reflect.Value, dst []any) ([]any, error) {
+	for _, f := range m.Fields {
+		if f.ReadOnly {
+			continue
+		}
+		fv := v.FieldByIndex(f.Index)
+		if f.Primary && f.Auto && fv.IsZero() {
+			continue
+		}
+		val, err := toDB(f, fv)
+		if err != nil {
+			return nil, err
+		}
+		dst = append(dst, val)
+	}
+	return dst, nil
+}
+
 func conflictFor(o insertOpts, m *meta.Model, cols []string) *q.OnConflict {
 	if o.conflict == nil {
 		return nil
@@ -534,13 +554,16 @@ func (db *DB) bulkLimits() (params, rows int) {
 }
 
 func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Value, o insertOpts) error {
+	w := db.newWriteInfo(ActionInsert, m) // nil without write plugins
 	for _, v := range items {
 		if err := callHook(ctx, v, hookBeforeInsert); err != nil {
 			return err
 		}
 		db.touchCreate(m, v)
-		if err := db.beforeWrite(ctx, ActionInsert, m, v, nil, true); err != nil {
-			return err
+		if w != nil {
+			if err := db.callWritePlugins(ctx, w, v); err != nil {
+				return err
+			}
 		}
 	}
 	cols, _, retPK, err := insertColumns(m, items[0], false)
@@ -552,16 +575,26 @@ func (db *DB) insertBulk(ctx context.Context, m *meta.Model, items []reflect.Val
 	kind := db.dialect.Kind()
 	idStep := int64(0) // MySQL: auto_increment_increment, read once
 	defer db.touched(ctx, m.Table)
+	// One value buffer and one row index, reused for every chunk: the
+	// statement copies the values into its own args.
+	n := min(chunk, len(items))
+	flat := make([]any, 0, n*len(cols))
+	rowsBuf := make([][]any, 0, n)
+	conflict := conflictFor(o, m, cols)
 	for start := 0; start < len(items); start += chunk {
 		part := items[start:min(start+chunk, len(items))]
-		ins := dialect.Insert{Table: m.Table, Columns: cols, OnConflict: conflictFor(o, m, cols)}
+		flat, rowsBuf = flat[:0], rowsBuf[:0]
 		for _, v := range part {
-			_, vals, _, err := insertColumns(m, v, false)
-			if err != nil {
+			from := len(flat)
+			if flat, err = insertValues(m, v, flat); err != nil {
 				return err
 			}
-			ins.Rows = append(ins.Rows, vals)
+			if len(flat)-from != len(cols) {
+				return fmt.Errorf("orm: InsertAll: records of %s have different columns", m.Type.Name())
+			}
+			rowsBuf = append(rowsBuf, flat[from:len(flat):len(flat)])
 		}
+		ins := dialect.Insert{Table: m.Table, Columns: cols, Rows: rowsBuf, OnConflict: conflict}
 		if retPK {
 			ins.Returning = m.PK.Column
 		}

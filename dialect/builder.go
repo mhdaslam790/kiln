@@ -145,6 +145,17 @@ func (d *sqlDialect) newBuf() *buf {
 	return b
 }
 
+// reserve makes room for n more args and about bytes more SQL, so large
+// statements (multi-row inserts) do not grow their buffers step by step.
+func (b *buf) reserve(n, bytes int) {
+	if need := len(b.args) + n; need > cap(b.args) {
+		args := make([]any, len(b.args), need)
+		copy(args, b.args)
+		b.args = args
+	}
+	b.sb.Grow(bytes)
+}
+
 func (b *buf) stmt() Stmt { return Stmt{SQL: b.sb.String(), Args: b.args} }
 
 // raw copies a SQL fragment, turning each '?' outside of quotes into a
@@ -465,6 +476,10 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 	if oc != nil && (d.kind == KindPostgres || d.kind == KindSQLite) && len(oc.Columns) == 0 && !oc.DoNothing {
 		return Stmt{}, errors.New("dialect: OnConflict.Update requires conflict Columns on this database")
 	}
+	if len(ins.Rows) > 1 {
+		n := len(ins.Rows) * len(ins.Columns)
+		b.reserve(n, n*6+len(ins.Columns)*24) // "$123, " per value, quoted column list
+	}
 	b.w("INSERT INTO ", d.Quote(ins.Table))
 
 	ret := ins.Returning
@@ -635,6 +650,8 @@ func (d *sqlDialect) Delete(table string, where q.Filter) (Stmt, error) {
 // VALUES order; MERGE can output the source position next to the new id.
 func (d *sqlDialect) mssqlMergeInsert(ins Insert) (Stmt, error) {
 	b := d.newBuf()
+	n := len(ins.Rows) * len(ins.Columns)
+	b.reserve(n, n*8+len(ins.Columns)*48)
 	pos := d.Quote(PositionColumn)
 	b.w("MERGE INTO ", d.Quote(ins.Table), " USING (VALUES ")
 	for r, row := range ins.Rows {

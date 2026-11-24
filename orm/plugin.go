@@ -97,7 +97,8 @@ func (a Action) String() string {
 	return fmt.Sprintf("Action(%d)", uint8(a))
 }
 
-// QueryInfo is passed to QueryPlugin.BeforeQuery.
+// QueryInfo is passed to QueryPlugin.BeforeQuery. It is valid only during
+// the call; plugins must not keep it.
 type QueryInfo struct {
 	Action Action
 	Table  string
@@ -110,12 +111,16 @@ type QueryInfo struct {
 	// Set holds the columns an update writes (ActionUpdate, and soft
 	// deletes). Plugins may inspect it, or append to it to write more.
 	Set []q.Mutation
+
+	query q.Query // backing store for Query: one allocation per call
 }
 
 // Where adds a filter to the query (AND-ed with the existing ones).
 func (i *QueryInfo) Where(f q.Filter) { i.Query.WhereCond = q.And(i.Query.WhereCond, f) }
 
-// WriteInfo is passed to WritePlugin.BeforeWrite, once per record.
+// WriteInfo is passed to WritePlugin.BeforeWrite, once per record. It is
+// valid only during the call: InsertAll reuses it for the next record, so
+// plugins must not keep it.
 type WriteInfo struct {
 	Action Action // ActionInsert or ActionUpdate
 	Table  string
@@ -192,13 +197,17 @@ func (db *DB) beforeQuery(ctx context.Context, a Action, m *meta.Model, qq q.Que
 	return db.runQueryPlugins(ctx, a, m, qq, set)
 }
 
-// runQueryPlugins is the slow path of beforeQuery (qq escapes here).
+// runQueryPlugins is the slow path of beforeQuery.
 func (db *DB) runQueryPlugins(ctx context.Context, a Action, m *meta.Model, qq q.Query, set []q.Mutation) (q.Query, []q.Mutation, error) {
-	table := tableName(qq.Table)
-	if m == nil {
-		m = meta.ByTable(table)
+	table := qq.Table
+	if m == nil || table != m.Table {
+		table = tableName(table)
+		if m == nil {
+			m = meta.ByTable(table)
+		}
 	}
-	info := &QueryInfo{Action: a, Table: table, Model: modelInfo(m), Query: &qq, Set: set}
+	info := &QueryInfo{Action: a, Table: table, Model: modelInfo(m), Set: set, query: qq}
+	info.Query = &info.query
 	for _, p := range db.queryPlugins {
 		if err := p.BeforeQuery(ctx, info); err != nil {
 			return qq, nil, err
@@ -225,7 +234,23 @@ func (db *DB) runWritePlugins(ctx context.Context, a Action, m *meta.Model, v re
 			fields[i] = f.Column
 		}
 	}
-	w := &WriteInfo{Action: a, Table: m.Table, Model: modelInfo(m), Record: v.Addr().Interface(), Fields: fields, m: m, v: v}
+	w := db.newWriteInfo(a, m)
+	w.Fields = fields
+	return db.callWritePlugins(ctx, w, v)
+}
+
+// newWriteInfo returns a WriteInfo for m, or nil without write plugins.
+// InsertAll creates one per call and reuses it for every record.
+func (db *DB) newWriteInfo(a Action, m *meta.Model) *WriteInfo {
+	if len(db.writePlugins) == 0 {
+		return nil
+	}
+	return &WriteInfo{Action: a, Table: m.Table, Model: modelInfo(m), m: m}
+}
+
+// callWritePlugins runs the write plugins on record v using w.
+func (db *DB) callWritePlugins(ctx context.Context, w *WriteInfo, v reflect.Value) error {
+	w.v, w.Record = v, v.Addr().Interface()
 	for _, p := range db.writePlugins {
 		if err := p.BeforeWrite(ctx, w); err != nil {
 			return err
