@@ -37,18 +37,19 @@ kiln migrate up
 9. [Transactions](#transactions)
 10. [Pagination](#pagination)
 11. [Hooks, scopes, logging, replicas](#hooks-scopes-logging-replicas)
-12. [Caching](#caching): query results (memory or Redis) and prepared statements
-13. [Migrations](#migrations)
-14. [Auto-generated migrations](#auto-generated-migrations)
-15. [Migration safety checks](#migration-safety-checks): `kiln lint` catches risky changes before production
-16. [Seeds](#seeds)
-17. [Testing your code](#testing-your-code)
-18. [Database notes](#database-notes)
-19. [Troubleshooting](#troubleshooting)
-20. [Compared with other Go libraries](#compared-with-other-go-libraries)
-21. [Performance](#performance)
-22. [Developing kiln](#developing-kiln)
-23. [License](#license)
+12. [Plugins](#plugins): one-line extensions (multi-tenancy, tracing, metrics) and writing your own
+13. [Caching](#caching): query results (memory or Redis) and prepared statements
+14. [Migrations](#migrations)
+15. [Auto-generated migrations](#auto-generated-migrations)
+16. [Migration safety checks](#migration-safety-checks): `kiln lint` catches risky changes before production
+17. [Seeds](#seeds)
+18. [Testing your code](#testing-your-code)
+19. [Database notes](#database-notes)
+20. [Troubleshooting](#troubleshooting)
+21. [Compared with other Go libraries](#compared-with-other-go-libraries)
+22. [Performance](#performance)
+23. [Developing kiln](#developing-kiln)
+24. [License](#license)
 
 ---
 
@@ -795,6 +796,57 @@ db.WithConn(ctx, func(ctx context.Context) error { // pin one connection (SET, t
 
 With replicas, reads go to replicas and writes go to the primary. Anything inside a
 transaction uses the primary.
+
+---
+
+## Plugins
+
+A plugin is turned on with one line when you open the database. Your queries don't change:
+
+```go
+db := orm.Open(sqlDB, dialect.Postgres(), myplugin.Plugin())
+```
+
+`WithHook` and `WithLogger` are built on the same mechanism.
+
+### Writing a plugin
+
+A plugin has a `Name` and implements any of three hooks. They run in the order the plugins
+were given. An error from a `Before` hook stops the operation before any SQL runs, and the
+caller gets that error unchanged.
+
+| Hook | Called | Can |
+|---|---|---|
+| `BeforeQuery(ctx, *orm.QueryInfo) error` | before every select, count, update and delete on a model table | add filters (`info.Where`), inspect or add the columns an update sets (`info.Set`) |
+| `BeforeWrite(ctx, *orm.WriteInfo) error` | for each record inserted or updated, after the model's own `Before` hooks | read and set fields (`w.Get`, `w.Set`) |
+| `AfterQuery(ctx, orm.Event)` | after every statement and cache hit | observe (logging, tracing, metrics) |
+
+For example, a plugin that hides rows of archived projects:
+
+```go
+type hideArchived struct{}
+
+func (hideArchived) Name() string { return "hide-archived" }
+
+func (hideArchived) BeforeQuery(ctx context.Context, info *orm.QueryInfo) error {
+	if info.Action == orm.ActionSelect && info.Model != nil {
+		if _, ok := info.Model.Column("archived"); ok {
+			info.Where(q.Eq(info.Table+".archived", false))
+		}
+	}
+	return nil
+}
+
+db := orm.Open(sqlDB, dialect.Postgres(), orm.Use(hideArchived{}))
+```
+
+`info.Action` is `ActionSelect`, `ActionCount`, `ActionUpdate` or `ActionDelete` (soft deletes
+included). `info.Model` describes the table's model, or is `nil` for a table no model maps to.
+Plugin packages usually return `orm.Use(...)` from a function, so users write
+`myplugin.Plugin()`.
+
+Plugins don't change raw SQL (`db.Query`, `db.Exec`, `q.SQL`) or many-to-many join tables;
+`AfterQuery` still sees them. With no plugins installed there is no extra cost.
 
 ---
 
