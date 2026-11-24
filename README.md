@@ -39,6 +39,7 @@ kiln migrate up
 - Read replicas, a pinned connection when you need session state, portable constraint errors.
 - A default query timeout, so one stuck query can't exhaust the connection pool.
 - Raw SQL is always possible (`db.Query`, `db.Exec`), so the ORM never boxes you in.
+- OpenTelemetry tracing and Prometheus metrics with one line each (`kilnotel`, `kilnprom`).
 
 **Performance**
 - About 0.6 µs of overhead per query over hand-written `database/sql` code
@@ -398,6 +399,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `migrate` | Versioned runner (`schema_migrations` table + lock), diff engine, database inspection and Go code rendering. |
 | `seed` | Ordered, named seeders, each run in a transaction. |
 | `cache` | Storage for the query result cache: the `Store` interface and the in-memory LRU. Redis lives in the separate module `cache/rediscache`. |
+| `kilnotel`, `kilnprom` | OpenTelemetry tracing and Prometheus metrics plugins, each its own module so the core needs neither. |
 | `ormtest` | In-memory mocks of `orm.Repository[T]`. |
 | `kilntest` | Real-database test helpers: a rolled-back transaction per test, factories, `Migrate`. No global state. |
 | `tenant` | Multi-tenancy plugin: scopes queries and writes to the tenant in the `ctx`. |
@@ -959,6 +961,45 @@ working throughout:
 3. **Migration:** remove the default so new rows must name their tenant:
    `s.ChangeColumn("tasks", "tenant_id", schema.BigInt, schema.Required())`. Make unique
    constraints per tenant where needed, e.g. `(tenant_id, email)` instead of `(email)`.
+
+### Tracing and metrics (`kilnotel`, `kilnprom`)
+
+Separate modules, so the core keeps zero dependencies:
+
+```bash
+go get github.com/mhdaslam790/kiln/kilnotel   # OpenTelemetry tracing
+go get github.com/mhdaslam790/kiln/kilnprom   # Prometheus metrics
+```
+
+```go
+db := orm.Open(sqlDB, dialect.Postgres(),
+	kilnotel.Plugin(),                            // one span per statement
+	kilnprom.Plugin(prometheus.DefaultRegisterer), // query and pool metrics
+)
+```
+
+**`kilnotel`**: each statement becomes a span under the request's span from `ctx`, named
+`select users`, with `db.system.name`, `db.collection.name`, `db.operation.name` and
+`db.query.text`. The query text keeps its placeholders; argument values are not recorded
+unless you opt in with `kilnotel.WithArgs()`. Cache hits show up with `kiln.cached=true`.
+`WithTracerProvider(tp)` picks a provider other than the global one.
+
+**`kilnprom`**:
+
+| Metric | Labels | Use it for |
+|---|---|---|
+| `kiln_query_duration_seconds` (histogram) | `db`, `table`, `action`, `outcome` (`ok` / `error` / `cached`) | latency per table, query rate, error rate, cache hit ratio |
+| `go_sql_*` (the standard `database/sql` collector) | `db_name` | pool exhaustion: connections in use, idle, wait count and time |
+
+Labels never contain SQL or values, so the number of series stays small. With several
+databases, give each a name: `kilnprom.Plugin(reg, kilnprom.WithDBName("analytics"))`.
+`kilnprom.Plugin` panics on a registration conflict, like `promauto`; `kilnprom.New` returns
+the error instead.
+
+Both are observers: they never change queries. When their hook isn't there, nothing runs.
+
+Your own hooks get the same information: `orm.Event` carries `Table` and `Action`
+(`orm.ActionRaw` for raw SQL) next to `SQL`, `Duration`, `Err`, `Cached` and `InTx`.
 
 ### Writing a plugin
 
