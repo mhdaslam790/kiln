@@ -63,7 +63,8 @@ func TestTenantRLS(t *testing.T) {
 			return n
 		}
 
-		must(t, asApp(tenant.Bypass(ctx), func(ctx context.Context) error {
+		// Bypass works for a role that skips RLS anyway (the test connects as a superuser).
+		must(t, db.Transaction(tenant.Bypass(ctx), func(ctx context.Context) error {
 			return users.InsertAll(ctx, []User{
 				{TenantID: 1, Name: "a1", Email: "rls-a1@x.io"}, {TenantID: 1, Name: "a2", Email: "rls-a2@x.io"},
 				{TenantID: 2, Name: "g1", Email: "rls-g1@x.io"},
@@ -77,6 +78,15 @@ func TestTenantRLS(t *testing.T) {
 			}
 			if n := rawCount(ctx); n != 2 { // the plugin never sees raw SQL: this is RLS
 				t.Errorf("raw count for tenant 1 = %d, want 2", n)
+			}
+			// SQL can't switch the policy off: there is no bypass setting.
+			if _, err := db.Exec(ctx, "SELECT set_config('app.tenant_bypass', 'on', true)"); err != nil {
+				return err
+			}
+			var n int64
+			must(t, db.Query(ctx, &n, "SELECT COUNT(*) FROM users, (SELECT set_config('app.tenant_bypass', 'on', true)) x"))
+			if n != 2 || rawCount(ctx) != 2 {
+				t.Errorf("a bypass setting widened the policy: %d rows", n)
 			}
 			return nil
 		}))
@@ -108,9 +118,17 @@ func TestTenantRLS(t *testing.T) {
 			}
 			return nil
 		}))
-		must(t, asApp(tenant.Bypass(ctx), func(ctx context.Context) error {
+		must(t, db.Transaction(tenant.Bypass(ctx), func(ctx context.Context) error {
 			if n := rawCount(ctx); n != 3 {
 				t.Errorf("raw count with Bypass = %d, want 3", n)
+			}
+			return nil
+		}))
+		// The app role gets nothing from Bypass (TestTenantRLSRoles checks that a
+		// connection as such a role is refused up front).
+		must(t, asApp(tenant.Bypass(ctx), func(ctx context.Context) error {
+			if n := rawCount(ctx); n != 0 {
+				t.Errorf("app role with Bypass sees %d rows, want 0", n)
 			}
 			return nil
 		}))

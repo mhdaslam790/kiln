@@ -42,7 +42,8 @@ func (p *Project) TenantRLS(tables []string, o TenantRLSOptions) error {
 	up := []string{
 		fmt.Sprintf("// PostgreSQL row-level security on %s (kiln tenant rls): the database", col),
 		"// itself hides other tenants' rows. Needs tenant.Plugin(..., tenant.WithRLS())",
-		"// and an app role that is not a superuser and has no BYPASSRLS.",
+		"// and an app role that is not a superuser and has no BYPASSRLS; cross-tenant",
+		"// work (tenant.Bypass) connects as a separate role that has BYPASSRLS.",
 	}
 	var down []string
 	for i, t := range tables {
@@ -68,6 +69,7 @@ func (p *Project) TenantRLS(tables []string, o TenantRLSOptions) error {
 	p.Out(`  2. orm.Open(..., tenant.Plugin(%q, tenant.WithRLS()))`, col)
 	p.Out("  3. run tenant work inside db.Transaction (e.g. one per request)")
 	p.Out("  4. connect as a role that is not a superuser (superusers skip RLS)")
+	p.Out("  5. tenant.Bypass work: a second *orm.DB connecting as a role WITH BYPASSRLS")
 	p.Out("new tenant tables later: kiln tenant rls <table>")
 	return nil
 }
