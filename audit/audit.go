@@ -30,6 +30,7 @@ import (
 
 	"github.com/mhdaslam790/kiln/orm"
 	"github.com/mhdaslam790/kiln/q"
+	"github.com/mhdaslam790/kiln/tenant"
 )
 
 // DefaultTable is the table entries go to (see Table).
@@ -41,6 +42,15 @@ type Option func(*plugin)
 // Actor sets the function that names who made a change, usually the user
 // id from the request context. Without it the actor is empty.
 func Actor(fn func(ctx context.Context) string) Option { return func(p *plugin) { p.actor = fn } }
+
+// Tenant records each entry's tenant in column (of the audit table), so a
+// multi-tenant app can show each tenant its own history and keep it apart
+// with row-level security. The value is the record's own column of that
+// name, or else the tenant in the context (tenant.With); without either it
+// is NULL. It is stored as text, matching how `kiln tenant rls` compares
+// tenant ids. `kiln audit init` adds the column when kiln.json has a
+// tenant_column.
+func Tenant(column string) Option { return func(p *plugin) { p.tenant = column } }
 
 // Table writes entries to name instead of DefaultTable.
 func Table(name string) Option { return func(p *plugin) { p.table = name } }
@@ -71,7 +81,11 @@ func Plugin(opts ...Option) orm.Option {
 		o(p)
 	}
 	p.skip[p.table] = true
-	p.insert = "INSERT INTO " + p.table + " (table_name, record_id, action, actor, changes, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+	if p.tenant == "" {
+		p.insert = "INSERT INTO " + p.table + " (table_name, record_id, action, actor, changes, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+	} else {
+		p.insert = "INSERT INTO " + p.table + " (table_name, record_id, action, actor, changes, created_at, " + p.tenant + ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+	}
 	return func(db *orm.DB) {
 		p.db = db
 		orm.Use(p)(db)
@@ -83,6 +97,7 @@ type plugin struct {
 	table  string
 	insert string
 	actor  func(context.Context) string
+	tenant string          // column for the entry's tenant; "" = not recorded
 	skip   map[string]bool // read-only after Plugin
 	redact map[string]bool // read-only after Plugin
 }
@@ -165,11 +180,28 @@ func (p *plugin) AfterWrite(ctx context.Context, w *orm.WriteInfo) error {
 	if p.actor != nil {
 		actor = p.actor(ctx)
 	}
-	_, err = p.db.Exec(ctx, p.insert, w.Table, recordID(w), w.Action.String(), actor, string(js), p.db.Now().UTC())
+	args := []any{w.Table, recordID(w), w.Action.String(), actor, string(js), p.db.Now().UTC()}
+	if p.tenant != "" {
+		args = append(args, p.tenantOf(ctx, w))
+	}
+	_, err = p.db.Exec(ctx, p.insert, args...)
 	if err != nil {
 		return fmt.Errorf("audit: writing entry: %w", err)
 	}
 	return nil
+}
+
+// tenantOf is the entry's tenant as text: the record's column, else the
+// context's tenant, else nil (NULL).
+func (p *plugin) tenantOf(ctx context.Context, w *orm.WriteInfo) any {
+	v, ok := w.Get(p.tenant)
+	if !ok {
+		v, _ = tenant.From(ctx)
+	}
+	if v = deref(plain(v)); v == nil {
+		return nil
+	}
+	return fmt.Sprint(v)
 }
 
 func (p *plugin) value(column string, v any) any {

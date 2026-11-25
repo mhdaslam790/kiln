@@ -46,6 +46,11 @@ func init() {
 	}
 
 	p.Config.TenantColumn = "tenant_id"
+	// The audit table gets the tenant column, so RLS covers it too.
+	must(p.AuditInit(AuditInitOptions{}))
+	if !strings.Contains(log.String(), `audit.Tenant("tenant_id")`) || !strings.Contains(log.String(), "kiln tenant rls audit_log") {
+		t.Errorf("audit init hints:\n%s", log.String())
+	}
 	must(p.TenantRLS(nil, TenantRLSOptions{}))
 	files, _ := filepath.Glob(p.path("db", "migrations", "*_tenant_rls.go"))
 	if len(files) != 1 {
@@ -57,10 +62,14 @@ func init() {
 		"s.Exec(`ALTER TABLE \"tasks\" FORCE ROW LEVEL SECURITY`)",
 		"CREATE POLICY kiln_tenant_isolation ON \"tasks\"",
 		"s.Exec(`DROP POLICY IF EXISTS kiln_tenant_isolation ON \"tasks\"`)",
+		"CREATE POLICY kiln_tenant_isolation ON \"audit_log\"",
 	} {
 		if !strings.Contains(string(src), want) {
 			t.Errorf("migration lacks %q:\n%s", want, src)
 		}
+	}
+	if strings.Contains(string(src), "bypass") {
+		t.Errorf("policy has a bypass switch that any SQL could set:\n%s", src)
 	}
 	if strings.Contains(string(src), `"users"`) {
 		t.Errorf("users has no tenant column but got a policy:\n%s", src)

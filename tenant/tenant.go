@@ -90,6 +90,17 @@ type Option func(*plugin)
 // your middleware); outside one they return ErrNoTransaction. Policies do
 // not apply to superusers or roles with BYPASSRLS: connect the app as an
 // ordinary role. PostgreSQL only; Plugin panics with another dialect.
+//
+// The policies have no bypass switch, so Bypass needs a connection as a
+// role with BYPASSRLS: open a second *orm.DB for admin tools and jobs,
+//
+//	db := orm.Open(appSQL, dialect.Postgres(), tenant.Plugin("tenant_id", tenant.WithRLS()))
+//	admin := orm.Open(adminSQL, dialect.Postgres(), tenant.Plugin("tenant_id")) // BYPASSRLS role
+//
+// and Bypass on db returns ErrBypassRole. What RLS guards against: queries
+// that forget the tenant (raw SQL, missed code paths). What it doesn't:
+// SQL that sets app.tenant_id to another tenant's id itself, such as
+// injected SQL that knows or guesses that id.
 func WithRLS() Option { return func(p *plugin) { p.rls = true } }
 
 // Plugin returns the option that enables tenant filtering on every model
@@ -107,7 +118,7 @@ func Plugin(column string, opts ...Option) orm.Option {
 			panic("tenant: WithRLS needs PostgreSQL, not " + string(db.Dialect().Kind()))
 		}
 		p.db = db
-		orm.Use(&rlsPlugin{p})(db)
+		orm.Use(&rlsPlugin{plugin: p})(db)
 	}
 }
 

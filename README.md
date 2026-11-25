@@ -1007,7 +1007,6 @@ s.Exec(`CREATE POLICY kiln_tenant_isolation ON "tasks" USING (...) WITH CHECK (.
 
 - Each transaction tells PostgreSQL its tenant (`set_config('app.tenant_id', ..., true)`,
   local to the transaction, so a pooled connection never carries it into the next request).
-  `tenant.Bypass` sets `app.tenant_bypass` instead.
 - Tenant work must run inside `db.Transaction`, typically one per request in your
   middleware. A query on a tenant table outside one returns `tenant.ErrNoTransaction`. Writes
   that kiln already wraps in its own transaction work, since that transaction gets the
@@ -1015,6 +1014,17 @@ s.Exec(`CREATE POLICY kiln_tenant_isolation ON "tasks" USING (...) WITH CHECK (.
 - No tenant means no rows: forgetting it fails safe.
 - Connect the app as an ordinary role. Superusers and roles with `BYPASSRLS` skip the
   policies.
+- **Cross-tenant work** (`tenant.Bypass`: admin tools, jobs) uses a second connection as a
+  role with `BYPASSRLS`. The policies have no bypass switch, because any SQL the app runs
+  could flip one. `Bypass` on the app's connection returns `tenant.ErrBypassRole`.
+  ```go
+  db := orm.Open(appSQL, dialect.Postgres(), tenant.Plugin("tenant_id", tenant.WithRLS()))
+  admin := orm.Open(adminSQL, dialect.Postgres(), tenant.Plugin("tenant_id")) // BYPASSRLS role
+  n, err := orm.For[Task](admin).Count(tenant.Bypass(ctx))
+  ```
+- **What it protects against:** queries that forget the tenant (raw SQL, a missed code path).
+  Not against SQL that sets `app.tenant_id` to another tenant's id itself, such as injected
+  SQL that knows or guesses that id: keep using parameters for values.
 - New tenant tables later: `kiln tenant rls invoices`. Writing the migration by hand:
   `tenant.RLSPolicy(table, column)` returns the same statements.
 - Cost: one `set_config` per transaction, only with `WithRLS`. The plugin's own filter keeps
@@ -1147,8 +1157,11 @@ Every `Insert`, `InsertAll` record, `Update` and `Delete` adds one row:
 - `audit.Skip("sessions")` leaves tables out; `audit.Table("change_log")` writes elsewhere.
 - Not recorded: `UpdateAny` / `DeleteAny` (they change rows kiln never sees as records), raw
   SQL and `Restore`.
-- The migration is yours: use `JSONB` for `changes` on PostgreSQL, add a tenant column, or
-  partition by time.
+- **Multi-tenant apps:** `audit.Tenant("tenant_id")` records each entry's tenant (the
+  record's own, else the context's), so each tenant can see only its own history. With
+  `tenant_column` in `kiln.json`, `kiln audit init` adds the column, and `kiln tenant rls`
+  then covers the audit table too.
+- The migration is yours: use `JSONB` for `changes` on PostgreSQL, or partition by time.
 
 ### Encrypted columns (`kilncrypt`)
 

@@ -1,6 +1,9 @@
 package gen
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // AuditInitOptions configures AuditInit.
 type AuditInitOptions struct {
@@ -9,7 +12,9 @@ type AuditInitOptions struct {
 
 // AuditInit writes a migration creating the table the audit module
 // (github.com/mhdaslam790/kiln/audit) writes to. The migration is yours to
-// change: e.g. make changes JSONB on PostgreSQL, or add a tenant column.
+// change: e.g. make changes JSONB on PostgreSQL. With a tenant_column in
+// kiln.json the table gets that column too (filled by audit.Tenant), so
+// `kiln tenant rls` covers it and each tenant sees only its own history.
 func (p *Project) AuditInit(o AuditInitOptions) error {
 	table := o.Table
 	if table == "" {
@@ -25,10 +30,18 @@ func (p *Project) AuditInit(o AuditInitOptions) error {
 		`	t.String("actor")`,
 		`	t.Text("changes") // JSON`,
 		`	t.DateTime("created_at", schema.Required())`,
+	}
+	tc := p.Config.TenantColumn
+	if tc != "" {
+		up = append(up,
+			fmt.Sprintf("	t.String(%q) // the entry's tenant (audit.Tenant); NULL for cross-tenant work", tc),
+			fmt.Sprintf("	t.Index([]string{%q, \"created_at\"}) // a tenant's history", tc))
+	}
+	up = append(up,
 		`	t.Index([]string{"table_name", "record_id"}) // history of one record`,
 		`	t.Index([]string{"created_at"})`,
 		"})",
-	}
+	)
 	down := []string{fmt.Sprintf("s.DropTable(%q)", table)}
 	if _, err := p.writeMigration("create_"+table, up, down); err != nil {
 		return err
@@ -36,10 +49,17 @@ func (p *Project) AuditInit(o AuditInitOptions) error {
 	p.Out("next:")
 	p.Out("  1. kiln migrate up")
 	p.Out("  2. go get github.com/mhdaslam790/kiln/audit")
-	if table == "audit_log" {
-		p.Out("  3. orm.Open(..., audit.Plugin(audit.Actor(userFromCtx)))")
-	} else {
-		p.Out("  3. orm.Open(..., audit.Plugin(audit.Table(%q), audit.Actor(userFromCtx)))", table)
+	var opts []string
+	if table != "audit_log" {
+		opts = append(opts, fmt.Sprintf("audit.Table(%q)", table))
+	}
+	if tc != "" {
+		opts = append(opts, fmt.Sprintf("audit.Tenant(%q)", tc))
+	}
+	opts = append(opts, "audit.Actor(userFromCtx)")
+	p.Out("  3. orm.Open(..., audit.Plugin(%s))", strings.Join(opts, ", "))
+	if tc != "" && p.Config.Dialect == "postgres" {
+		p.Out("  with row-level security: kiln tenant rls %s", table)
 	}
 	return nil
 }
