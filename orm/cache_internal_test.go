@@ -76,3 +76,16 @@ func TestQueryTables(t *testing.T) {
 		t.Fatalf("raw SQL tables: %v", got)
 	}
 }
+
+func TestCacheTTLMustExpire(t *testing.T) {
+	db, _ := fakeDB(t, 1)
+	WithCache(CacheTTL(0))(db)
+	if db.cache.ttl != time.Minute {
+		t.Fatalf("CacheTTL(0) gave ttl %v: entries would never expire", db.cache.ttl)
+	}
+	db2, _ := fakeDB(t, 1)
+	WithCache(CacheTTL(5 * time.Second))(db2)
+	if db2.cache.ttl != 5*time.Second {
+		t.Fatalf("ttl %v", db2.cache.ttl)
+	}
+}

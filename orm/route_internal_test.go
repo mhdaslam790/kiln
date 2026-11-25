@@ -3,6 +3,7 @@ package orm
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync/atomic"
 	"testing"
 )
@@ -67,5 +68,25 @@ func TestRoutePlugin(t *testing.T) {
 	}
 	if r.asked.Load() != 2 {
 		t.Fatalf("asked %d times, want still 2", r.asked.Load())
+	}
+
+	// A transaction that wrote tells the plugins again at commit (the
+	// changes become visible then); a read-only or rolled-back one doesn't.
+	before := r.wrote.Load()
+	must(t, db.Transaction(ctx, func(ctx context.Context) error {
+		_, err := db.Exec(ctx, "UPDATE bench_users SET name = ?", "y")
+		return err
+	}))
+	if got := r.wrote.Load() - before; got != 2 {
+		t.Fatalf("write + commit: wrote %d, want 2", got)
+	}
+	before = r.wrote.Load()
+	must(t, db.Transaction(ctx, func(ctx context.Context) error { _, err := users.FindAll(ctx); return err }))
+	_ = db.Transaction(ctx, func(ctx context.Context) error {
+		_, _ = db.Exec(ctx, "UPDATE bench_users SET name = ?", "z")
+		return errors.New("rollback")
+	})
+	if got := r.wrote.Load() - before; got != 1 {
+		t.Fatalf("read-only + rolled back: wrote %d, want 1 (the rolled-back statement)", got)
 	}
 }

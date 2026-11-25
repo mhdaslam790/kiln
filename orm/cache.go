@@ -29,8 +29,15 @@ type CacheOption func(*resultCache)
 func CacheStore(s cache.Store) CacheOption { return func(c *resultCache) { c.store = s } }
 
 // CacheTTL sets the expiry used when orm.Cached is given ttl <= 0
-// (default 1 minute).
-func CacheTTL(d time.Duration) CacheOption { return func(c *resultCache) { c.ttl = d } }
+// (default 1 minute). d <= 0 keeps the default: entries must expire, as
+// results made stale by a write are never deleted, only no longer read.
+func CacheTTL(d time.Duration) CacheOption {
+	return func(c *resultCache) {
+		if d > 0 {
+			c.ttl = d
+		}
+	}
+}
 
 // CachePrefix namespaces every key (default "kiln:"), so several
 // applications or databases can share one Redis.

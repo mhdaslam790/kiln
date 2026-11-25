@@ -22,6 +22,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -88,6 +89,10 @@ type plugin struct {
 
 type oldKey struct{}
 
+// missing is stored under oldKey when the row to update doesn't exist:
+// the update writes nothing, so nothing is logged.
+type missing struct{}
+
 func (p *plugin) Name() string { return "audit" }
 
 // BeforeWrite loads the row as it is before an update, for the diff.
@@ -101,6 +106,12 @@ func (p *plugin) BeforeWrite(ctx context.Context, w *orm.WriteInfo) error {
 	}
 	old := reflect.New(reflect.TypeOf(w.Record).Elem())
 	if err := p.db.Select(ctx, old.Interface(), q.From(w.Table).Where(where)); err != nil {
+		if errors.Is(err, orm.ErrNotFound) {
+			// Let kiln report it as it would without audit (ErrStale with
+			// a version lock, otherwise a no-op).
+			w.SetValue(oldKey{}, missing{})
+			return nil
+		}
 		return fmt.Errorf("audit: loading %s before update: %w", w.Table, err)
 	}
 	w.SetValue(oldKey{}, old.Elem())
@@ -119,6 +130,9 @@ func (p *plugin) AfterWrite(ctx context.Context, w *orm.WriteInfo) error {
 			changes[f.Column] = p.value(f.Column, v)
 		}
 	case orm.ActionUpdate:
+		if _, gone := w.Value(oldKey{}).(missing); gone {
+			return nil // no row was updated
+		}
 		old, _ := w.Value(oldKey{}).(reflect.Value)
 		for _, f := range w.Model.Fields {
 			// Not written by an update (key, created_at, read-only), or
@@ -151,7 +165,7 @@ func (p *plugin) AfterWrite(ctx context.Context, w *orm.WriteInfo) error {
 	if p.actor != nil {
 		actor = p.actor(ctx)
 	}
-	_, err = p.db.Exec(ctx, p.insert, w.Table, recordID(w), w.Action.String(), actor, string(js), time.Now().UTC())
+	_, err = p.db.Exec(ctx, p.insert, w.Table, recordID(w), w.Action.String(), actor, string(js), p.db.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("audit: writing entry: %w", err)
 	}

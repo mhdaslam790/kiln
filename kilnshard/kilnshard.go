@@ -35,7 +35,9 @@ import (
 )
 
 var (
-	// ErrNoKey is returned when the context carries no shard key.
+	// ErrNoKey is returned when the context carries no shard key, or an
+	// empty one (e.g. an anonymous request), rather than sending all such
+	// data to one shard.
 	ErrNoKey = errors.New("kilnshard: no shard key in context")
 	// ErrUnknownShard is returned when Lookup names a shard that doesn't exist.
 	ErrUnknownShard = errors.New("kilnshard: unknown shard")
@@ -48,10 +50,10 @@ func With(ctx context.Context, key string) context.Context {
 	return context.WithValue(ctx, ctxKey{}, key)
 }
 
-// KeyFrom returns the shard key carried by ctx.
+// KeyFrom returns the shard key carried by ctx; an empty key is no key.
 func KeyFrom(ctx context.Context) (string, bool) {
 	k, ok := ctx.Value(ctxKey{}).(string)
-	return k, ok
+	return k, ok && k != ""
 }
 
 // Option configures New.
@@ -128,7 +130,7 @@ func (r *Router) Shard(ctx context.Context, key string) (string, *orm.DB, error)
 // DB returns the DB of the shard for the context's key.
 func (r *Router) DB(ctx context.Context) (*orm.DB, error) {
 	key, ok := r.key(ctx)
-	if !ok {
+	if !ok || key == "" {
 		return nil, ErrNoKey
 	}
 	_, db, err := r.Shard(ctx, key)

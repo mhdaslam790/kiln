@@ -29,8 +29,16 @@ type entry struct {
 type Set struct{ items []entry }
 
 // Add registers a seeder. Seeders run in registration order (for generated
-// files that is file-name, i.e. creation, order).
-func (s *Set) Add(name string, fn Func) { s.items = append(s.items, entry{name, fn}) }
+// files that is file-name, i.e. creation, order). It panics if name is
+// already registered, as two seeders can't be told apart by name.
+func (s *Set) Add(name string, fn Func) {
+	for _, e := range s.items {
+		if e.name == name {
+			panic(fmt.Sprintf("seed: %q registered twice", name))
+		}
+	}
+	s.items = append(s.items, entry{name, fn})
+}
 
 // Names lists the registered seeders.
 func (s *Set) Names() []string {
@@ -48,19 +56,24 @@ func (s *Set) Run(ctx context.Context, db *orm.DB, names ...string) error {
 	for _, n := range names {
 		want[n] = true
 	}
-	ran := 0
+	// Check every name before running anything: a typo must not leave
+	// the other seeders half applied.
+	have := map[string]bool{}
+	for _, e := range s.items {
+		have[e.name] = true
+	}
+	for _, n := range names {
+		if !have[n] {
+			return fmt.Errorf("seed %q not found (have %v)", n, s.Names())
+		}
+	}
 	for _, e := range s.items {
 		if len(want) > 0 && !want[e.name] {
 			continue
 		}
-		delete(want, e.name)
 		if err := db.Transaction(ctx, func(ctx context.Context) error { return e.fn(ctx, db) }); err != nil {
 			return fmt.Errorf("seed %s: %w", e.name, err)
 		}
-		ran++
-	}
-	for n := range want {
-		return fmt.Errorf("seed %q not found (have %v)", n, s.Names())
 	}
 	return nil
 }

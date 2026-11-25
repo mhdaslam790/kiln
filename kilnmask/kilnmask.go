@@ -125,7 +125,7 @@ func Copy[T any](v T, opts ...Option) T {
 		opt(&o)
 	}
 	rv := reflect.ValueOf(&v).Elem()
-	if out, changed := mask(rv, &o); changed {
+	if out, changed := mask(rv, &o, map[visit]reflect.Value{}); changed {
 		return out.Interface().(T)
 	}
 	return v
@@ -153,6 +153,7 @@ type fieldPlan struct {
 	index int
 	tag   string // mask tag, "" for a field to descend into
 	ptr   bool   // *string
+	zero  bool   // tagged, but not a string: cleared (fail closed)
 }
 
 var plans sync.Map // reflect.Type -> *plan; bounded by the number of struct types
@@ -173,6 +174,8 @@ func planFor(t reflect.Type) *plan {
 			p.fields = append(p.fields, fieldPlan{index: i, tag: tag})
 		case tagged && tag != "-" && f.Type.Kind() == reflect.Pointer && f.Type.Elem().Kind() == reflect.String:
 			p.fields = append(p.fields, fieldPlan{index: i, tag: tag, ptr: true})
+		case tagged && tag != "-": // a number, []byte, struct, ...: no rule fits, so hide it all
+			p.fields = append(p.fields, fieldPlan{index: i, zero: true})
 		case tag != "-" && mayContain(f.Type, map[reflect.Type]bool{}):
 			p.fields = append(p.fields, fieldPlan{index: i})
 		}
@@ -184,7 +187,9 @@ func planFor(t reflect.Type) *plan {
 // mayContain reports whether t can hold a struct with mask tags.
 func mayContain(t reflect.Type, seen map[reflect.Type]bool) bool {
 	switch t.Kind() {
-	case reflect.Pointer, reflect.Slice, reflect.Array:
+	case reflect.Interface:
+		return true // decided by the value at run time
+	case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
 		return mayContain(t.Elem(), seen)
 	case reflect.Struct:
 		if seen[t] {
@@ -204,15 +209,22 @@ func mayContain(t reflect.Type, seen map[reflect.Type]bool) bool {
 	return false
 }
 
+// visit identifies a pointer already being copied, so cyclic data (a child
+// pointing back to its parent) is copied once instead of recursing forever.
+type visit struct {
+	ptr uintptr
+	typ reflect.Type
+}
+
 // mask returns a masked copy of v, or (v, false) if nothing in it needed
 // masking, so untouched parts are shared rather than copied.
-func mask(v reflect.Value, o *options) (reflect.Value, bool) {
+func mask(v reflect.Value, o *options, seen map[visit]reflect.Value) (reflect.Value, bool) {
 	switch v.Kind() {
 	case reflect.Interface:
 		if v.IsNil() {
 			return v, false
 		}
-		inner, changed := mask(v.Elem(), o)
+		inner, changed := mask(v.Elem(), o, seen)
 		if !changed {
 			return v, false
 		}
@@ -223,12 +235,42 @@ func mask(v reflect.Value, o *options) (reflect.Value, bool) {
 		if v.IsNil() {
 			return v, false
 		}
-		inner, changed := mask(v.Elem(), o)
-		if !changed {
-			return v, false
+		key := visit{v.Pointer(), v.Type()}
+		if out, ok := seen[key]; ok {
+			return out, true // a cycle: point to the copy being made
 		}
 		out := reflect.New(v.Type().Elem())
+		seen[key] = out
+		inner, changed := mask(v.Elem(), o, seen)
+		if !changed { // nothing below referred to out (that would be a change)
+			delete(seen, key)
+			return v, false
+		}
 		out.Elem().Set(inner)
+		return out, true
+	case reflect.Map:
+		if v.IsNil() {
+			return v, false
+		}
+		var out reflect.Value
+		iter := v.MapRange()
+		for iter.Next() {
+			item, changed := mask(iter.Value(), o, seen)
+			if !changed {
+				continue
+			}
+			if !out.IsValid() {
+				out = reflect.MakeMapWithSize(v.Type(), v.Len())
+				all := v.MapRange()
+				for all.Next() {
+					out.SetMapIndex(all.Key(), all.Value())
+				}
+			}
+			out.SetMapIndex(iter.Key(), item)
+		}
+		if !out.IsValid() {
+			return v, false
+		}
 		return out, true
 	case reflect.Slice, reflect.Array:
 		if v.Kind() == reflect.Slice && v.IsNil() {
@@ -236,7 +278,7 @@ func mask(v reflect.Value, o *options) (reflect.Value, bool) {
 		}
 		var out reflect.Value
 		for i := 0; i < v.Len(); i++ {
-			item, changed := mask(v.Index(i), o)
+			item, changed := mask(v.Index(i), o, seen)
 			if !changed {
 				continue
 			}
@@ -265,8 +307,13 @@ func mask(v reflect.Value, o *options) (reflect.Value, bool) {
 		for _, f := range p.fields {
 			fv := out.Field(f.index)
 			switch {
+			case f.zero:
+				if !fv.IsZero() {
+					fv.SetZero()
+					changed = true
+				}
 			case f.tag == "":
-				if m, ok := mask(fv, o); ok {
+				if m, ok := mask(fv, o, seen); ok {
 					fv.Set(m)
 					changed = true
 				}

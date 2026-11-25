@@ -51,12 +51,23 @@ func (s *Store) Set(ctx context.Context, key string, value []byte, ttl time.Dura
 	return s.c.Set(ctx, key, value, ttl).Err()
 }
 
-// Delete implements cache.Store.
+// Delete implements cache.Store. Several keys are deleted with pipelined
+// DELs, not one multi-key DEL, which Redis Cluster refuses (CROSSSLOT) when
+// the keys live in different slots.
 func (s *Store) Delete(ctx context.Context, keys ...string) error {
-	if len(keys) == 0 {
+	switch len(keys) {
+	case 0:
 		return nil
+	case 1:
+		return s.c.Del(ctx, keys[0]).Err()
 	}
-	return s.c.Del(ctx, keys...).Err()
+	_, err := s.c.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for _, k := range keys {
+			p.Del(ctx, k)
+		}
+		return nil
+	})
+	return err
 }
 
 // GetMulti fetches several keys in one round trip (missing keys are nil).
