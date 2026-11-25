@@ -114,6 +114,8 @@ func (d *sqlDialect) ident(s string) string {
 	return strings.Join(parts, ".")
 }
 
+func (d *sqlDialect) QuoteName(name string) string { return d.ident(name) }
+
 func (d *sqlDialect) Rebind(sql string) string {
 	b := d.newBuf()
 	// Rebind on its own does not validate arg counts; feed nil args.
@@ -282,6 +284,10 @@ func (b *buf) filter(f q.Filter) error {
 		b.w(")")
 	case q.ExprFilter:
 		return b.raw(x.SQL, x.Args, true)
+	case q.JSONCond:
+		return b.jsonCond(x)
+	case q.JSONContainsCond:
+		return b.jsonContains(x)
 	default:
 		return fmt.Errorf("dialect: unsupported filter %T", f)
 	}

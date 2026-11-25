@@ -405,6 +405,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `audit` | Audit log plugin, its own module; `kiln audit init` writes its table migration. |
 | `kilncrypt` | Column encryption with blind-index search and key rotation, its own module. |
 | `kilnmask` | Masks personal data in API responses and logs (`mask` tags), its own module. |
+| `kilnpg` | PostgreSQL arrays (`Array[T]` with `Has`, `Contains`, `Overlaps` filters) and enum types in migrations, its own module. |
 | `kilnbreaker` | Circuit breaker: fail fast while the database is down, its own module. |
 | `kilnrw` | Read-your-writes with read replicas, its own module. |
 | `kilnshard` | Split data across databases by key (tenant, customer), its own module. |
@@ -458,6 +459,7 @@ Run commands from anywhere inside your module. Paths come from `kiln.json`.
 | `kiln new <name>` | Empty migration for hand-written changes or data migrations |
 | `kiln diff [name] [--dry-run] [--db] [--dsn url]` | Migration from model changes ([details](#auto-generated-migrations)) |
 | `kiln pull [table...] [--force] [--dsn url]` | Generate models from an existing database |
+| `kiln erd [table...] [--out file] [--db] [--dsn url]` | Diagram of the tables and relations (Mermaid) ([details](#schema-diagram)) |
 | `kiln lint [--all] [--strict] [--dsn url] [--tenant-column col]` | Check migrations for changes that are risky in production ([details](#migration-safety-checks)) |
 | `kiln audit init [--table name]` | Write the migration for the audit log table ([details](#audit-log-audit)) |
 | `kiln tenant rls [table...] [--column col]` | Write a migration that adds PostgreSQL row-level security to tenant tables ([details](#multi-tenancy-tenant)) |
@@ -554,6 +556,23 @@ ok, err := users.Exists(ctx, q.Eq("email", e))
 if errors.Is(err, orm.ErrNotFound) { ... }
 ```
 
+**Totals**, typed by the column (from [`kiln gen`](#typed-columns-compile-time-checked), or
+`q.Col[int64]("amount")`):
+
+```go
+c := domain.OrderCols
+total, err := orm.Sum(ctx, orders, c.Amount, c.Status.Eq("paid")) // int64, like the column
+avg, err := orm.Avg(ctx, orders, c.Amount)                        // float64 (integers not rounded)
+first, err := orm.Min(ctx, orders, c.CreatedAt)                   // time.Time; orm.ErrNotFound if none
+largest, err := orm.Max(ctx, orders, c.Amount)
+byStatus, err := orm.CountBy(ctx, orders, c.Status)              // map[Status]int64
+revenue, err := orm.SumBy(ctx, orders, c.Country, c.Amount)       // map[string]int64
+```
+
+They apply the same filters, scopes, soft delete and plugins as `FindAll` (with the tenant
+plugin, a tenant only adds up its own rows). `Sum` of nothing is 0. `CountBy`/`SumBy` leave out
+rows where the grouping column is NULL. For anything else, `db.Select` takes any query.
+
 **Filters**: `Eq Ne Lt Lte Gt Gte Like NotLike Null NotNull In NotIn InOf Between`,
 combined with `And Or Not`, plus `Expr("lower(email) = ?", e)` for raw SQL fragments.
 **Modifiers**: `Sort("-col")` (`-` means descending), `Limit`, `Offset`, `Page(page, size)`,
@@ -570,6 +589,22 @@ space can't be filtered by name (use `q.Expr`). `Update` of a row that no longer
 
 Write `?` placeholders in `Expr` and raw SQL. They are converted to `$1`/`@p1` per dialect
 (`??` gives a literal `?`).
+
+**Inside JSON columns** (fields tagged `db:"prefs,json"`), on all four databases:
+
+```go
+users.FindAll(ctx, q.JSON("prefs", "theme").Eq("dark"))
+users.FindAll(ctx, q.JSON("prefs", "limits", "max").Gt(10))           // numbers compare as numbers
+users.FindAll(ctx, q.JSON("prefs", "beta").Eq(true))                  // JSON true/false
+users.FindAll(ctx, q.JSON("doc", "items", "0", "sku").Eq("A-1"))      // digits = array index
+users.FindAll(ctx, q.JSON("prefs", "note").IsNull())                  // missing or null
+users.FindAll(ctx, q.JSONContains("prefs", map[string]any{"beta": true})) // PostgreSQL, MySQL
+```
+
+The Go type of the value picks the comparison: text, number or boolean. Keys are sent as
+query parameters, so any key is safe, even one from user input. `JSONContains` (`@>` on
+PostgreSQL, `JSON_CONTAINS` on MySQL) returns an error on SQLite and SQL Server instead of
+running slowly. On PostgreSQL, index what you filter on, e.g. a GIN index for `JSONContains`.
 
 **Arbitrary queries** go into any struct or scalar:
 
@@ -872,13 +907,27 @@ requests. Ties on the sort column are broken by the primary key. Sorting by a nu
 ascending and first when descending, the same on every database. Pass cursors to clients as
 is. A modified cursor returns `orm.ErrBadCursor`. Index the sort column for best performance.
 
-### Batches
+### Every row, with flat memory
 
 ```go
+for u, err := range users.Iter(ctx, q.Eq("active", true), q.Sort("created_at")) {
+	if err != nil {
+		return err
+	}
+	send(u)
+}
+
 err := users.Each(ctx, 1000, func(u User) error { ...; return nil }, q.Eq("active", true))
 ```
 
-`Each` streams a whole table in primary-key batches with constant memory.
+`Iter` (for `range`) and `Each` (a callback, with your batch size) read a table of any size in
+keyset pages, so memory stays flat. No connection is held while your code runs, so the loop
+body can query and write, even on SQLite. Breaking out of the loop stops reading.
+
+- They follow a `q.Sort` on one field (then the primary key; NULLs last ascending, first
+  descending), or the primary key without one. `q.Limit` caps the total.
+- More sort fields or `q.Offset` are an error rather than a wrong result; use `Cursor` or
+  `Paginate` for those.
 
 ---
 
@@ -1207,6 +1256,49 @@ plain, err := found.Email.Open(keys)                  // decrypt only where you 
   re-run, and afterwards the old key can go. Values re-encrypt on any update too.
 - A partial `Update(ctx, &p, "Email")` must also write `"EmailIndex"`; kiln returns an error
   rather than leave a stale index.
+
+### PostgreSQL arrays and enums (`kilnpg`)
+
+A separate, dependency-free module (`go get github.com/mhdaslam790/kiln/kilnpg`). It works
+with pgx and lib/pq alike.
+
+```go
+type Mood string
+
+type Post struct {
+	ID   int64
+	Tags kilnpg.Array[string] `schema:"sqltype:TEXT[]"` // nil = NULL, empty = '{}'
+	Mood Mood                 `schema:"sqltype:mood"`
+}
+
+posts.FindAll(ctx, kilnpg.Has("tags", "go"))                // 'go' = ANY(tags)
+posts.FindAll(ctx, kilnpg.Contains("tags", "go", "sql"))    // has both (@>)
+posts.FindAll(ctx, kilnpg.Overlaps("tags", "go", "rust"))   // has either (&&)
+posts.FindAll(ctx, kilnpg.ContainedBy("tags", "go", "sql")) // nothing else (<@)
+```
+
+Enum types in migrations:
+
+```go
+Up: func(s *schema.Schema) {
+	kilnpg.CreateEnum(s, "mood", "happy", "sad")
+	s.CreateTable("posts", func(t *schema.Table) {
+		t.ID("id")
+		t.Text("tags", schema.SQLType("TEXT[]"))
+		t.String("mood", schema.Required(), kilnpg.EnumType("mood"))
+	})
+},
+Down: func(s *schema.Schema) {
+	s.DropTable("posts")
+	kilnpg.DropEnum(s, "mood")
+},
+```
+
+`kilnpg.AddEnumValue(s, "mood", "calm")` adds a value. Use the new value in a later
+migration, because PostgreSQL only allows it once the transaction that added it has committed.
+`Array` holds `string`, `bool`, integer and float elements (or named types of them). It can't
+hold NULL elements and returns an error when it reads one. Index array columns you filter on
+with GIN: `CREATE INDEX ON posts USING gin (tags)`.
 
 ### Masking personal data (`kilnmask`)
 
@@ -1591,6 +1683,38 @@ kiln diff --dry-run        # print only
 kiln diff --db             # compare with the live database instead of the migrations
 kiln pull                  # the reverse: models from an existing database
 ```
+
+### Schema diagram
+
+```bash
+kiln erd                       # print a Mermaid diagram of the schema the migrations build
+kiln erd --out docs/schema.md  # write it into Markdown; GitHub and GitLab draw it
+kiln erd users posts           # only these tables
+kiln erd --db                  # from the live database instead
+```
+
+```mermaid
+erDiagram
+    users {
+        bigint id PK
+        string email UK
+        text bio "null"
+    }
+    posts {
+        bigint id PK
+        bigint user_id FK
+        bigint editor_id FK "null"
+        string_200 title
+    }
+    users ||--o{ posts : "user_id"
+    users |o--o{ posts : "editor_id"
+```
+
+Each table lists its columns with `PK`/`FK`/`UK` and `"null"` for nullable ones. Each foreign
+key is a relationship labelled with its column: one-to-many, one-to-one when the key is
+unique, and optional when it is nullable. A many-to-many join table shows as a table with two
+keys. No database is needed: like `kiln diff`, it replays your migrations. Steps written as raw
+SQL or Go code can't be read that way, and `kiln erd` says so; use `--db` for those.
 
 ### What the models control
 

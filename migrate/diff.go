@@ -229,7 +229,7 @@ func columnChange(d dialect.Dialect, cur, want schema.Column, dec declared) (sch
 	if dec.scale && cur.Scale != want.Scale {
 		out.Scale, changed = want.Scale, true
 	}
-	if dec.sqlType && cur.SQLType != want.SQLType {
+	if dec.sqlType && !sameSQLType(cur.SQLType, want.SQLType) {
 		out.SQLType, changed = want.SQLType, true
 	}
 	if dec.def && (cur.HasDef != want.HasDef || fmt.Sprint(cur.Default) != fmt.Sprint(want.Default)) {
@@ -273,4 +273,14 @@ func zeroDefault(t schema.ColumnType) (any, bool) {
 		return false, true
 	}
 	return nil, false
+}
+
+// sameSQLType compares two SQL types, ignoring case and identifier quotes
+// ("mood" and mood, TEXT[] and text[]).
+func sameSQLType(a, b string) bool {
+	strip := strings.NewReplacer(`"`, "", "`", "", "[", "", "]", "")
+	if strings.HasSuffix(a, "[]") != strings.HasSuffix(b, "[]") {
+		return false
+	}
+	return strings.EqualFold(strip.Replace(a), strip.Replace(b))
 }

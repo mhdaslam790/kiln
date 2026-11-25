@@ -114,7 +114,7 @@ func (d *timeDest) Scan(v any) error {
 		*d.p = x
 		return nil
 	}
-	var n sql.NullTime
+	var n nullTime
 	if err := n.Scan(v); err != nil {
 		return err
 	}

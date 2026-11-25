@@ -210,6 +210,8 @@ func columnOf(m *meta.Model, f *meta.Field, tag map[string]string) (schema.Colum
 			c.Type = schema.Float
 		case reflect.String:
 			c.Type = schema.String
+		case reflect.Slice, reflect.Map: // a nil slice or map is stored as NULL
+			c.Type, null = schema.Text, true
 		default:
 			c.Type = schema.Text
 		}

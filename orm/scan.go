@@ -42,6 +42,7 @@ const (
 	skFloat
 	skBool
 	skTime
+	skTimePtr // *time.Time
 	skGeneric // anything else: scan through **T
 	skFast    // plain field written in place by a fastDest
 )
@@ -55,7 +56,10 @@ type colPlan struct {
 	fast   fastDest      // skFast: the scanner's destination
 }
 
-var timeType = reflect.TypeOf(time.Time{})
+var (
+	timeType    = reflect.TypeOf(time.Time{})
+	timePtrType = reflect.PointerTo(timeType)
+)
 
 // scanPlan is the column layout of one result shape for a model. It is
 // computed once and cached; scanners built from it are pooled, so a query
@@ -109,6 +113,8 @@ func buildPlan(m *meta.Model, names []string) *scanPlan {
 			c.kind = skJSON
 		case newFastDest(f.Type) != nil && fastOK(m, f, &c):
 			c.kind = skFast
+		case f.Type == timePtrType:
+			c.kind = skTimePtr
 		case f.Type.Kind() == reflect.Pointer || reflect.PointerTo(f.Type).Implements(scannerType):
 			c.kind = skDirect
 		case f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.Uint8 && f.Type != bytesType:
@@ -147,8 +153,8 @@ func (p *scanPlan) newScanner() *structScanner {
 			c.holder = new(any)
 		case skJSON, skBytes:
 			c.holder = new([]byte)
-		case skTime:
-			c.holder = new(sql.NullTime)
+		case skTime, skTimePtr:
+			c.holder = new(nullTime)
 		case skString:
 			c.holder = new(sql.NullString)
 		case skInt, skUint:
@@ -181,8 +187,8 @@ func (s *structScanner) release() {
 			*h = nil
 		case *sql.NullString:
 			*h = sql.NullString{}
-		case *sql.NullTime:
-			*h = sql.NullTime{}
+		case *nullTime:
+			*h = nullTime{}
 		}
 		if c.kind == skDirect {
 			s.dests[i] = nil
@@ -252,7 +258,15 @@ func (s *structScanner) scan(rows *sql.Rows, dst reflect.Value) error {
 		case skTime:
 			// Assign through a typed pointer: reflect.ValueOf(time) would
 			// allocate for every row.
-			*(target.Addr().Interface().(*time.Time)) = c.holder.(*sql.NullTime).Time
+			*(target.Addr().Interface().(*time.Time)) = c.holder.(*nullTime).Time
+		case skTimePtr:
+			p := target.Addr().Interface().(**time.Time)
+			if h := c.holder.(*nullTime); h.Valid {
+				t := h.Time
+				*p = &t
+			} else {
+				*p = nil
+			}
 		case skGeneric:
 			if p := c.ptr.Elem(); !p.IsNil() {
 				target.Set(p.Elem())
@@ -327,7 +341,7 @@ func scanInto(ctx context.Context, rows *sql.Rows, dst any) error {
 		out := reflect.MakeSlice(et, 0, 8)
 		for rows.Next() {
 			p := reflect.New(elem)
-			if err := rows.Scan(p.Interface()); err != nil {
+			if err := rows.Scan(scalarDest(p.Interface())); err != nil {
 				return err
 			}
 			out = reflect.Append(out, p.Elem())
@@ -363,7 +377,7 @@ func scanInto(ctx context.Context, rows *sql.Rows, dst any) error {
 		}
 		return ErrNotFound
 	}
-	if err := rows.Scan(dst); err != nil {
+	if err := rows.Scan(scalarDest(dst)); err != nil {
 		return err
 	}
 	return rows.Err()

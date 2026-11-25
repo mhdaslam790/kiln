@@ -343,6 +343,26 @@ The generated schema tags make 'kiln diff --db' report no changes.`,
 	pullCmd.Flags().StringVar(&po.DSN, "dsn", "", "database URL (overrides DATABASE_URL)")
 	pullCmd.Flags().BoolVar(&po.Force, "force", false, "overwrite existing model files")
 
+	// erd
+	var eo gen.ERDOptions
+	erdCmd := &cobra.Command{
+		Use:   "erd [table...]",
+		Short: "Draw the tables and their relations as a Mermaid diagram",
+		Long: `Prints the schema your migrations build as a Mermaid entity-relationship
+diagram, which GitHub, GitLab and most Markdown viewers draw. No database is
+needed; --db reads the live database instead. Pass table names to draw only
+those. --out writes a file (a .md file gets a mermaid code block):
+
+  kiln erd --out docs/schema.md`,
+		RunE: run(func(p *gen.Project, a []string) error {
+			eo.Tables = a
+			return p.ERD(eo)
+		}),
+	}
+	erdCmd.Flags().BoolVar(&eo.DB, "db", false, "read the live database (DATABASE_URL) instead of the migrations")
+	erdCmd.Flags().StringVar(&eo.DSN, "dsn", "", "database URL for --db (overrides DATABASE_URL)")
+	erdCmd.Flags().StringVarP(&eo.Out, "out", "o", "", "write to this file instead of printing (.md: in a mermaid block)")
+
 	// seeds
 	newSeedCmd := &cobra.Command{
 		Use:   "new-seed <name>",
@@ -361,5 +381,5 @@ The generated schema tags make 'kiln diff --db' report no changes.`,
 	seedCmd.Flags().StringVar(&seedDSN, "dsn", "", "database URL (overrides DATABASE_URL)")
 
 	rootCmd.AddCommand(initCmd, newCmd, createCmd, addColumnCmd, dropColumnCmd, renameColumnCmd, genCmd,
-		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, scaffoldCmd, pullCmd, newSeedCmd, seedCmd, tenantCmd, auditCmd)
+		addIndexCmd, dropIndexCmd, migrateCmd, diffCmd, lintCmd, scaffoldCmd, pullCmd, erdCmd, newSeedCmd, seedCmd, tenantCmd, auditCmd)
 }

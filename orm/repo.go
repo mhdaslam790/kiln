@@ -144,38 +144,15 @@ func (r *Repo[T]) Paginate(ctx context.Context, page, perPage int, qs ...q.Queri
 	}, nil
 }
 
-// Each streams matching records in batches of size (ordered by primary
-// key), so arbitrarily large tables can be processed with bounded memory.
-// Returning an error from fn stops the iteration.
+// Each calls fn for every matching record, reading batches of size by
+// keyset, so arbitrarily large tables are processed with bounded memory.
+// It follows a q.Sort on one field (else the primary key) and a q.Limit,
+// like Iter. Returning an error from fn stops the iteration.
 func (r *Repo[T]) Each(ctx context.Context, size int, fn func(T) error, qs ...q.Querier) error {
-	if r.m.PK == nil {
-		return pkMissing(r.m)
-	}
 	if size < 1 {
 		size = 500
 	}
-	pk := r.m.Table + "." + r.m.PK.Column
-	var last any
-	for {
-		page := append([]q.Querier(nil), qs...)
-		if last != nil {
-			page = append(page, q.Gt(pk, last))
-		}
-		page = append(page, q.Sort(pk), q.Limit(size))
-		items, err := r.FindAll(ctx, page...)
-		if err != nil {
-			return err
-		}
-		for _, it := range items {
-			if err := fn(it); err != nil {
-				return err
-			}
-		}
-		if len(items) < size {
-			return nil
-		}
-		last = reflect.ValueOf(items[len(items)-1]).FieldByIndex(r.m.PK.Index).Interface()
-	}
+	return r.walk(ctx, size, qs, func(it T) (bool, error) { return true, fn(it) })
 }
 
 // Insert inserts rec and fills its primary key and timestamps.
