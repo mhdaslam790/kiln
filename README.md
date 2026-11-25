@@ -458,6 +458,7 @@ Run commands from anywhere inside your module. Paths come from `kiln.json`.
 | `kiln new <name>` | Empty migration for hand-written changes or data migrations |
 | `kiln diff [name] [--dry-run] [--db] [--dsn url]` | Migration from model changes ([details](#auto-generated-migrations)) |
 | `kiln pull [table...] [--force] [--dsn url]` | Generate models from an existing database |
+| `kiln erd [table...] [--out file] [--db] [--dsn url]` | Diagram of the tables and relations (Mermaid) ([details](#schema-diagram)) |
 | `kiln lint [--all] [--strict] [--dsn url] [--tenant-column col]` | Check migrations for changes that are risky in production ([details](#migration-safety-checks)) |
 | `kiln audit init [--table name]` | Write the migration for the audit log table ([details](#audit-log-audit)) |
 | `kiln tenant rls [table...] [--column col]` | Write a migration that adds PostgreSQL row-level security to tenant tables ([details](#multi-tenancy-tenant)) |
@@ -1622,6 +1623,38 @@ kiln diff --dry-run        # print only
 kiln diff --db             # compare with the live database instead of the migrations
 kiln pull                  # the reverse: models from an existing database
 ```
+
+### Schema diagram
+
+```bash
+kiln erd                       # print a Mermaid diagram of the schema the migrations build
+kiln erd --out docs/schema.md  # write it into Markdown; GitHub and GitLab draw it
+kiln erd users posts           # only these tables
+kiln erd --db                  # from the live database instead
+```
+
+```mermaid
+erDiagram
+    users {
+        bigint id PK
+        string email UK
+        text bio "null"
+    }
+    posts {
+        bigint id PK
+        bigint user_id FK
+        bigint editor_id FK "null"
+        string_200 title
+    }
+    users ||--o{ posts : "user_id"
+    users |o--o{ posts : "editor_id"
+```
+
+Each table lists its columns with `PK`/`FK`/`UK` and `"null"` for nullable ones. Each foreign
+key is a relationship labelled with its column: one-to-many, one-to-one when the key is
+unique, and optional when it is nullable. A many-to-many join table shows as a table with two
+keys. No database is needed: like `kiln diff`, it replays your migrations. Steps written as raw
+SQL or Go code can't be read that way, and `kiln erd` says so; use `--db` for those.
 
 ### What the models control
 
