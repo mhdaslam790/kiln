@@ -405,6 +405,7 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 | `audit` | Audit log plugin, its own module; `kiln audit init` writes its table migration. |
 | `kilncrypt` | Column encryption with blind-index search and key rotation, its own module. |
 | `kilnmask` | Masks personal data in API responses and logs (`mask` tags), its own module. |
+| `kilnpg` | PostgreSQL arrays (`Array[T]` with `Has`, `Contains`, `Overlaps` filters) and enum types in migrations, its own module. |
 | `kilnbreaker` | Circuit breaker: fail fast while the database is down, its own module. |
 | `kilnrw` | Read-your-writes with read replicas, its own module. |
 | `kilnshard` | Split data across databases by key (tenant, customer), its own module. |
@@ -588,6 +589,22 @@ space can't be filtered by name (use `q.Expr`). `Update` of a row that no longer
 
 Write `?` placeholders in `Expr` and raw SQL. They are converted to `$1`/`@p1` per dialect
 (`??` gives a literal `?`).
+
+**Inside JSON columns** (fields tagged `db:"prefs,json"`), on all four databases:
+
+```go
+users.FindAll(ctx, q.JSON("prefs", "theme").Eq("dark"))
+users.FindAll(ctx, q.JSON("prefs", "limits", "max").Gt(10))           // numbers compare as numbers
+users.FindAll(ctx, q.JSON("prefs", "beta").Eq(true))                  // JSON true/false
+users.FindAll(ctx, q.JSON("doc", "items", "0", "sku").Eq("A-1"))      // digits = array index
+users.FindAll(ctx, q.JSON("prefs", "note").IsNull())                  // missing or null
+users.FindAll(ctx, q.JSONContains("prefs", map[string]any{"beta": true})) // PostgreSQL, MySQL
+```
+
+The Go type of the value picks the comparison: text, number or boolean. Keys are sent as
+query parameters, so any key is safe, even one from user input. `JSONContains` (`@>` on
+PostgreSQL, `JSON_CONTAINS` on MySQL) returns an error on SQLite and SQL Server instead of
+running slowly. On PostgreSQL, index what you filter on, e.g. a GIN index for `JSONContains`.
 
 **Arbitrary queries** go into any struct or scalar:
 
@@ -1239,6 +1256,49 @@ plain, err := found.Email.Open(keys)                  // decrypt only where you 
   re-run, and afterwards the old key can go. Values re-encrypt on any update too.
 - A partial `Update(ctx, &p, "Email")` must also write `"EmailIndex"`; kiln returns an error
   rather than leave a stale index.
+
+### PostgreSQL arrays and enums (`kilnpg`)
+
+A separate, dependency-free module (`go get github.com/mhdaslam790/kiln/kilnpg`). It works
+with pgx and lib/pq alike.
+
+```go
+type Mood string
+
+type Post struct {
+	ID   int64
+	Tags kilnpg.Array[string] `schema:"sqltype:TEXT[]"` // nil = NULL, empty = '{}'
+	Mood Mood                 `schema:"sqltype:mood"`
+}
+
+posts.FindAll(ctx, kilnpg.Has("tags", "go"))                // 'go' = ANY(tags)
+posts.FindAll(ctx, kilnpg.Contains("tags", "go", "sql"))    // has both (@>)
+posts.FindAll(ctx, kilnpg.Overlaps("tags", "go", "rust"))   // has either (&&)
+posts.FindAll(ctx, kilnpg.ContainedBy("tags", "go", "sql")) // nothing else (<@)
+```
+
+Enum types in migrations:
+
+```go
+Up: func(s *schema.Schema) {
+	kilnpg.CreateEnum(s, "mood", "happy", "sad")
+	s.CreateTable("posts", func(t *schema.Table) {
+		t.ID("id")
+		t.Text("tags", schema.SQLType("TEXT[]"))
+		t.String("mood", schema.Required(), kilnpg.EnumType("mood"))
+	})
+},
+Down: func(s *schema.Schema) {
+	s.DropTable("posts")
+	kilnpg.DropEnum(s, "mood")
+},
+```
+
+`kilnpg.AddEnumValue(s, "mood", "calm")` adds a value. Use the new value in a later
+migration, because PostgreSQL only allows it once the transaction that added it has committed.
+`Array` holds `string`, `bool`, integer and float elements (or named types of them). It can't
+hold NULL elements and returns an error when it reads one. Index array columns you filter on
+with GIN: `CREATE INDEX ON posts USING gin (tags)`.
 
 ### Masking personal data (`kilnmask`)
 

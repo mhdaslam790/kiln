@@ -5,7 +5,7 @@ go 1.23.2
 require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/jackc/pgx/v5 v5.7.5
-	github.com/mhdaslam790/kiln v1.10.0
+	github.com/mhdaslam790/kiln v1.11.0
 	github.com/mhdaslam790/kiln/audit v0.0.0-00010101000000-000000000000
 	github.com/mhdaslam790/kiln/kilnbreaker v0.0.0-00010101000000-000000000000
 	github.com/mhdaslam790/kiln/kilncrypt v0.0.0-00010101000000-000000000000
@@ -38,6 +38,7 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mhdaslam790/kiln/cache/rediscache v1.0.0
+	github.com/mhdaslam790/kiln/kilnpg v0.1.0
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
@@ -66,3 +67,5 @@ replace github.com/mhdaslam790/kiln/kilnshard => ../kilnshard
 replace github.com/mhdaslam790/kiln/cache/rediscache => ../cache/rediscache
 
 replace github.com/mhdaslam790/kiln/kilnvalidate => ../kilnvalidate
+
+replace github.com/mhdaslam790/kiln/kilnpg => ../kilnpg

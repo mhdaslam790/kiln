@@ -131,3 +131,17 @@ func TestRenderedCodeCompiles(t *testing.T) {
 		t.Fatalf("up=%d down=%d", len(res.Up), len(res.Down))
 	}
 }
+
+func TestSameSQLType(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{`"mood"`, "mood", true}, {"TEXT[]", "text[]", true}, {"[nvarchar](20)", "NVARCHAR(20)", true},
+		{"TEXT[]", "TEXT", false}, {"mood", "moods", false}, {"`citext`", "CITEXT", true},
+	} {
+		if got := sameSQLType(c.a, c.b); got != c.want {
+			t.Errorf("sameSQLType(%q, %q) = %v", c.a, c.b, got)
+		}
+	}
+}
