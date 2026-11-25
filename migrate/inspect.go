@@ -37,7 +37,67 @@ func Inspect(ctx context.Context, db *orm.DB) (*schema.State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("migrate: inspect: %w", err)
 	}
-	return buildState(cols, idx, fks), nil
+	st := buildState(cols, idx, fks)
+	if db.Dialect().Kind() == dialect.KindPostgres {
+		if err := pgEnums(ctx, db, st); err != nil {
+			return nil, fmt.Errorf("migrate: inspect: %w", err)
+		}
+	}
+	return st, nil
+}
+
+// pgArrayElem spells PostgreSQL's internal element type names (int8 in
+// _int8) the way migrations write them.
+var pgArrayElem = map[string]string{
+	"int2": "SMALLINT", "int4": "INTEGER", "int8": "BIGINT", "float4": "REAL",
+	"float8": "DOUBLE PRECISION", "bool": "BOOLEAN", "bpchar": "CHAR",
+}
+
+// pgEnums loads the schema's enum types and names enum and array columns
+// the way migrations write them (mood, mood[], BIGINT[]).
+func pgEnums(ctx context.Context, db *orm.DB, st *schema.State) error {
+	var rows []struct {
+		Name  string `db:"name"`
+		Label string `db:"label"`
+	}
+	if err := db.Query(ctx, &rows, `
+SELECT t.typname AS name, e.enumlabel AS label
+FROM pg_type t
+JOIN pg_enum e ON e.enumtypid = t.oid
+JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE n.nspname = current_schema()
+ORDER BY t.typname, e.enumsortorder`); err != nil {
+		return err
+	}
+	byFold := map[string]string{}
+	for _, r := range rows {
+		if st.Enums == nil {
+			st.Enums = map[string][]string{}
+		}
+		st.Enums[r.Name] = append(st.Enums[r.Name], r.Label)
+		byFold[strings.ToLower(r.Name)] = r.Name
+	}
+	for _, t := range st.Tables {
+		for i := range t.Columns {
+			c := &t.Columns[i]
+			base, arr := strings.CutSuffix(c.SQLType, "[]")
+			if c.SQLType == "" {
+				continue
+			}
+			if name, ok := byFold[strings.ToLower(base)]; ok {
+				base = name
+			} else if arr {
+				if n, ok := pgArrayElem[strings.ToLower(base)]; ok {
+					base = n
+				}
+			}
+			if arr {
+				base += "[]"
+			}
+			c.SQLType = base
+		}
+	}
+	return nil
 }
 
 type colRow struct {
@@ -419,7 +479,8 @@ func sqliteFKName(createSQL, col, table string) string {
 
 const pgColumns = `
 SELECT c.table_name AS tbl, c.column_name AS col,
-       CASE WHEN c.data_type IN ('USER-DEFINED', 'ARRAY') THEN c.udt_name ELSE c.data_type END AS typ,
+       CASE WHEN c.data_type = 'ARRAY' THEN substr(c.udt_name, 2) || '[]'
+            WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS typ,
        c.is_nullable = 'YES' AS nullable, c.column_default AS def,
        c.character_maximum_length AS len, c.numeric_precision AS prec, c.numeric_scale AS scale,
        EXISTS (SELECT 1 FROM information_schema.table_constraints tc

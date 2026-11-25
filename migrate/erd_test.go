@@ -60,3 +60,32 @@ func TestERD(t *testing.T) {
 		t.Errorf("filtered ERD:\n%s", part)
 	}
 }
+
+func TestERDEnums(t *testing.T) {
+	many := "CREATE TYPE big AS ENUM ('a','b','c','d','e','f','g','h','i','j')"
+	st, err := Replay([]Migration{{Version: 1, Name: "enums", Up: func(s *schema.Schema) {
+		s.Exec(`CREATE TYPE "kiln mood" AS ENUM ('happy', 'say "hi"')`)
+		s.Exec(many)
+		s.CreateTable("people", func(t *schema.Table) {
+			t.ID("id")
+			t.String("mood", schema.Required(), schema.SQLType(`"kiln mood"`))
+			t.Text("moods", schema.SQLType(`"kiln mood"[]`))
+			t.String("size", schema.SQLType("big"))
+			t.Text("tags", schema.SQLType("TEXT[]"))
+		})
+	}}})
+	if err != nil || st.Opaque != 0 {
+		t.Fatalf("%v, opaque %d", err, st.Opaque)
+	}
+	got := ERD(st)
+	for _, want := range []string{
+		`kiln_mood mood "happy | say 'hi'"`,
+		`kiln_mood[] moods "null; happy | say 'hi'"`,
+		`big size "null; a | b | c | d | e | f | g | h | ... (2 more)"`,
+		`text[] tags "null"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

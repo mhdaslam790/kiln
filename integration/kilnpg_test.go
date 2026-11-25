@@ -101,11 +101,37 @@ func TestKilnPG(t *testing.T) {
 		must(t, posts.Update(ctx, &got, "Tags"))
 		check("after update", titles(kilnpg.Has("tags", "new")), "b")
 
-		// kiln diff sees the model and its migration as the same schema.
+		// kiln diff sees the model and its migration as the same schema, and
+		// reads the enum statements (nothing opaque).
 		res, err := migrate.DiffMigrations(append(migrations(), mig), PgPost{})
 		must(t, err)
 		for _, op := range res.Up {
 			t.Errorf("diff wants a change: %#v", op)
+		}
+		for _, n := range res.Notes {
+			if strings.Contains(n, "not modelled") {
+				t.Errorf("diff note: %s", n)
+			}
+		}
+		// The live database reads back the same: enum values, array types.
+		live, err := migrate.Inspect(ctx, db)
+		must(t, err)
+		if got := live.Enums["kiln mood"]; !slices.Equal(got, []string{"happy", "sad", "it's ok"}) {
+			t.Errorf("inspected enum = %q", got)
+		}
+		lt := live.Tables["pg_posts"]
+		for col, want := range map[string]string{"tags": "TEXT[]", "scores": "BIGINT[]", "mood": "kiln mood"} {
+			if c := lt.Column(col); c == nil || c.SQLType != want {
+				t.Errorf("inspected %s = %+v, want SQLType %q", col, c, want)
+			}
+		}
+		res, err = migrate.Diff(&schema.State{Tables: map[string]*schema.TableState{"pg_posts": lt}, Enums: live.Enums}, PgPost{})
+		must(t, err)
+		for _, op := range res.Up {
+			t.Errorf("diff --db wants a change: %#v", op)
+		}
+		if !strings.Contains(migrate.ERD(live, "pg_posts"), `"happy | sad | it's ok"`) {
+			t.Errorf("ERD has no enum values:\n%s", migrate.ERD(live, "pg_posts"))
 		}
 
 		// The database refuses values outside the enum.

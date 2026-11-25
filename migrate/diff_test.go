@@ -139,6 +139,8 @@ func TestSameSQLType(t *testing.T) {
 	}{
 		{`"mood"`, "mood", true}, {"TEXT[]", "text[]", true}, {"[nvarchar](20)", "NVARCHAR(20)", true},
 		{"TEXT[]", "TEXT", false}, {"mood", "moods", false}, {"`citext`", "CITEXT", true},
+		{"INT8[]", "BIGINT[]", true}, {"int[]", "INTEGER[]", true}, {"VARCHAR(20)", "character varying(20)", true},
+		{"BIGINT[]", "INTEGER[]", false},
 	} {
 		if got := sameSQLType(c.a, c.b); got != c.want {
 			t.Errorf("sameSQLType(%q, %q) = %v", c.a, c.b, got)

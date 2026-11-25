@@ -33,6 +33,7 @@ func Replay(history []Migration) (*schema.State, error) {
 // columns with PK/FK/UK markers ("null" for nullable ones); each foreign
 // key is a relationship labelled with its column(s): one-to-many, or
 // one-to-one when the key is unique, and optional when it is nullable.
+// A PostgreSQL enum column lists its values.
 //
 // With tables, only those tables and the relationships between them are
 // drawn.
@@ -81,8 +82,15 @@ func ERD(st *schema.State, tables ...string) string {
 			if len(keys) > 0 {
 				line += " " + strings.Join(keys, ", ")
 			}
+			var notes []string
 			if !c.Required && !c.Primary && c.Type != schema.ID {
-				line += ` "null"`
+				notes = append(notes, "null")
+			}
+			if vals, ok := enumOf(st, c.SQLType); ok {
+				notes = append(notes, enumNote(vals))
+			}
+			if len(notes) > 0 {
+				line += ` "` + strings.Join(notes, "; ") + `"`
 			}
 			b.WriteString(line + "\n")
 		}
@@ -114,7 +122,7 @@ func ERD(st *schema.State, tables ...string) string {
 func erdType(c schema.Column) string {
 	switch {
 	case c.SQLType != "":
-		return erdName(strings.ToLower(c.SQLType))
+		return erdSQLType(c.SQLType)
 	case c.Type == schema.String && c.Limit > 0:
 		return fmt.Sprintf("string_%d", c.Limit)
 	case c.Type == schema.ID:
@@ -160,4 +168,54 @@ func sameSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// enumNote lists an enum's values for a column comment (at most 8; a
+// Mermaid comment can't hold double quotes).
+func enumNote(vals []string) string {
+	shown := vals
+	if len(shown) > 8 {
+		shown = shown[:8]
+	}
+	out := strings.ReplaceAll(strings.Join(shown, " | "), `"`, "'")
+	if len(vals) > len(shown) {
+		out += fmt.Sprintf(" | ... (%d more)", len(vals)-len(shown))
+	}
+	return out
+}
+
+// erdSQLType shows a SQL type as Mermaid allows: identifier quotes
+// dropped, [] and (n) kept, anything else (spaces, commas) as _.
+func erdSQLType(t string) string {
+	t = strings.ToLower(strings.NewReplacer(`"`, "", "`", "").Replace(strings.TrimSpace(t)))
+	arr := strings.HasSuffix(t, "[]")
+	t = strings.NewReplacer("[", "", "]", "", ", ", ",").Replace(strings.TrimSuffix(t, "[]"))
+	t = strings.Map(func(r rune) rune {
+		if r == '(' || r == ')' || r == '_' || r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, t)
+	if arr {
+		t += "[]"
+	}
+	return t
+}
+
+// enumOf returns the values of the enum type a column (or array column)
+// has, if it is one of the schema's enums.
+func enumOf(st *schema.State, sqlType string) ([]string, bool) {
+	base := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sqlType), "[]"))
+	if base == "" || len(st.Enums) == 0 {
+		return nil, false
+	}
+	if v, ok := st.Enums[base]; ok {
+		return v, true
+	}
+	if len(base) > 1 && base[0] == '"' && base[len(base)-1] == '"' {
+		v, ok := st.Enums[strings.ReplaceAll(base[1:len(base)-1], `""`, `"`)]
+		return v, ok
+	}
+	v, ok := st.Enums[strings.ToLower(base)]
+	return v, ok
 }
