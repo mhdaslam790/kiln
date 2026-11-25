@@ -122,11 +122,20 @@ func setTime(v reflect.Value, t time.Time) {
 		case *time.Time:
 			*p = t
 			return
-		case **time.Time:
-			*p = &t
-			return
 		case *sql.NullTime:
 			*p = sql.NullTime{Time: t, Valid: true}
+			return
+		}
+	}
+	setTimeSlow(v, t)
+}
+
+// setTimeSlow handles *time.Time fields and unaddressable values. It is
+// separate so that t only escapes to the heap here, not on every call.
+func setTimeSlow(v reflect.Value, t time.Time) {
+	if v.CanAddr() {
+		if p, ok := v.Addr().Interface().(**time.Time); ok {
+			*p = &t
 			return
 		}
 	}
@@ -164,6 +173,9 @@ func pkFilter(m *meta.Model, v reflect.Value) (q.Filter, error) {
 	}
 	if m.PK != nil && v.FieldByIndex(m.PK.Index).IsZero() {
 		return nil, fmt.Errorf("orm: %s has a zero primary key", m.Type.Name())
+	}
+	if len(m.PKs) == 1 { // the common case: no slice, no AND
+		return q.Eq(m.PKs[0].Column, v.FieldByIndex(m.PKs[0].Index).Interface()), nil
 	}
 	fs := make([]q.Filter, len(m.PKs))
 	for i, f := range m.PKs {

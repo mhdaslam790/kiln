@@ -39,22 +39,22 @@ func TestAllocGuard(t *testing.T) {
 		max  float64
 		fn   func()
 	}{
-		{"FindByID", 21, func() { _, _ = users1.FindByID(ctx, 1) }},
-		{"FindAll100", 320, func() { _, _ = users100.FindAll(ctx, q.Eq("age", 3)) }},
-		{"Count", 19, func() { _, _ = users1.Count(ctx, q.Eq("age", 3)) }},
-		{"Insert", 28, func() { x := benchUser{Name: "n"}; _ = users1.Insert(ctx, &x) }},
-		{"Update", 15, func() { _ = users1.Update(ctx, &u) }},
-		{"UpdateFields", 13, func() { _ = users1.Update(ctx, &u, "Age") }},
-		{"UpdateAny", 12, func() { _, _ = users1.UpdateAny(ctx, q.Eq("age", 3), q.Set("age", 4)) }},
-		{"HardDelete", 7, func() { _ = users1.HardDelete(ctx, &u) }},
+		{"FindByID", 19, func() { _, _ = users1.FindByID(ctx, 1) }},
+		{"FindAll100", 319, func() { _, _ = users100.FindAll(ctx, q.Eq("age", 3)) }},
+		{"Count", 18, func() { _, _ = users1.Count(ctx, q.Eq("age", 3)) }},
+		{"Insert", 26, func() { x := benchUser{Name: "n"}; _ = users1.Insert(ctx, &x) }},
+		{"Update", 13, func() { _ = users1.Update(ctx, &u) }},
+		{"UpdateFields", 11, func() { _ = users1.Update(ctx, &u, "Age") }},
+		{"UpdateAny", 11, func() { _, _ = users1.UpdateAny(ctx, q.Eq("age", 3), q.Set("age", 4)) }},
+		{"HardDelete", 6, func() { _ = users1.HardDelete(ctx, &u) }},
 		{"Transaction", 9, func() { _ = db1.Transaction(ctx, func(context.Context) error { return nil }) }},
 		// Batch limits allow 1%: database/sql pool bookkeeping moves the
 		// count by ±2, while a per-record cost would add 100 or more.
-		{"InsertAll100", 850, func() { _ = users1.InsertAll(ctx, make100()) }},
+		{"InsertAll100", 655, func() { _ = users1.InsertAll(ctx, make100()) }},
 		// With a plugin installed, each hook costs at most one allocation
 		// per call (not per record).
-		{"Plugin/FindByID", 22, func() { _, _ = pusers.FindByID(ctx, 1) }},
-		{"Plugin/InsertAll100", 850, func() { _ = pusers.InsertAll(ctx, make100()) }},
+		{"Plugin/FindByID", 20, func() { _, _ = pusers.FindByID(ctx, 1) }},
+		{"Plugin/InsertAll100", 655, func() { _ = pusers.InsertAll(ctx, make100()) }},
 	} {
 		got := testing.AllocsPerRun(200, tc.fn)
 		if os.Getenv("KILN_ALLOC_PRINT") != "" {
