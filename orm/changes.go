@@ -198,6 +198,7 @@ func (r *Repo[T]) Cursor(ctx context.Context, o CursorOpts, qs ...q.Querier) (Cu
 		}
 	}
 	col, pkCol := r.m.Table+"."+sortF.Column, r.m.Table+"."+pk.Column
+	nullable := sortF != pk && canBeNull(sortF.Type)
 
 	// Walking backwards = querying in the opposite direction, then reversing.
 	backward := o.Before != ""
@@ -217,20 +218,20 @@ func (r *Repo[T]) Cursor(ctx context.Context, o CursorOpts, qs ...q.Querier) (Cu
 		if scanDesc {
 			cmp = q.Lt
 		}
-		if sortF == pk {
+		switch {
+		case sortF == pk:
 			all = append(all, cmp(pkCol, vals[0]))
-		} else {
+		case !nullable:
 			all = append(all, q.Or(cmp(col, vals[0]), q.And(q.Eq(col, vals[0]), cmp(pkCol, vals[1]))))
+		default: // NULL sorts as larger than every value
+			all = append(all, afterNullable(col, pkCol, vals[0], vals[1], scanDesc))
 		}
 	}
-	dir := ""
-	if scanDesc {
-		dir = "-"
-	}
-	if sortF == pk {
-		all = append(all, q.Sort(dir+pkCol))
-	} else {
-		all = append(all, q.Sort(dir+col, dir+pkCol))
+	switch {
+	case sortF == pk:
+		all = append(all, sortBy(q.SortField{Field: pkCol, Desc: scanDesc}))
+	default:
+		all = append(all, sortBy(q.SortField{Field: col, Desc: scanDesc, NullsLarge: nullable}, q.SortField{Field: pkCol, Desc: scanDesc}))
 	}
 	all = append(all, q.Limit(o.Limit+1))
 
@@ -273,6 +274,32 @@ func (r *Repo[T]) Cursor(ctx context.Context, o CursorOpts, qs ...q.Querier) (Cu
 	return page, nil
 }
 
+// canBeNull reports whether a field of type t can hold NULL: a pointer, or
+// a type that scans itself (sql.NullInt64, ...).
+func canBeNull(t reflect.Type) bool {
+	return t.Kind() == reflect.Pointer || reflect.PointerTo(t).Implements(scannerType)
+}
+
+// afterNullable is the keyset condition for rows after (v, id) when the
+// sort column can be NULL and NULL sorts as larger than every value. v is
+// nil for a NULL.
+func afterNullable(col, pkCol string, v, id any, desc bool) q.Filter {
+	switch {
+	case !desc && v != nil:
+		return q.Or(q.Gt(col, v), q.And(q.Eq(col, v), q.Gt(pkCol, id)), q.Null(col))
+	case !desc:
+		return q.And(q.Null(col), q.Gt(pkCol, id))
+	case v != nil:
+		return q.Or(q.Lt(col, v), q.And(q.Eq(col, v), q.Lt(pkCol, id)))
+	default:
+		return q.Or(q.NotNull(col), q.And(q.Null(col), q.Lt(pkCol, id)))
+	}
+}
+
+func sortBy(fields ...q.SortField) q.Querier {
+	return q.QuerierFunc(func(x *q.Query) { x.Sorts = append(x.Sorts, fields...) })
+}
+
 var cursorEnc = base64.RawURLEncoding
 
 // ErrBadCursor is returned for cursors that cannot be decoded.
@@ -299,6 +326,12 @@ func decodeCursor(s string, fields ...*meta.Field) ([]any, error) {
 		t := fields[i].Type
 		for t.Kind() == reflect.Pointer {
 			t = t.Elem()
+		}
+		if string(raws[i]) == "null" { // a NULL sort value
+			if i == len(out)-1 {
+				return nil, ErrBadCursor // the primary key is never NULL
+			}
+			continue
 		}
 		p := reflect.New(t)
 		if err := json.Unmarshal(raws[i], p.Interface()); err != nil {

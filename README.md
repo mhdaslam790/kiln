@@ -428,7 +428,8 @@ return uc.Create(ctx, &domain.User{Name: "Admin", Email: "admin@example.com"})
 - **Preload** loads associations with one `IN (...)` query per level, never one query per row.
 - **Migrations.** The runner takes a database-wide lock, so two app instances starting at once
   don't both migrate (PostgreSQL advisory lock, MySQL `GET_LOCK`, SQL Server
-  `sp_getapplock`). It then applies each pending migration and its `schema_migrations` row in
+  `sp_getapplock`, and on SQLite a row in `kiln_migrate_lock`, taken over after 10 minutes
+  if its process died). It then applies each pending migration and its `schema_migrations` row in
   one transaction. On SQLite, operations that `ALTER TABLE` cannot do are performed by the
   official rebuild procedure (copy into a new table, swap, re-index, check foreign keys).
 - **Diffing.** `kiln diff` builds the *current* schema by replaying your migrations into a
@@ -866,7 +867,9 @@ prev, err := users.Cursor(ctx, opts, q.Eq("active", true))
 Each page continues from the last row it saw
 (`WHERE created_at < ? OR (created_at = ? AND id < ?)`) instead of using `OFFSET`. Page
 10,000 is as fast as page 1, and rows aren't skipped or repeated when data changes between
-requests. Ties on the sort column are broken by the primary key. Pass cursors to clients as
+requests. Ties on the sort column are broken by the primary key. Sorting by a nullable column
+(a pointer or `sql.Null*` field) works too: rows with NULL come after every value when
+ascending and first when descending, the same on every database. Pass cursors to clients as
 is. A modified cursor returns `orm.ErrBadCursor`. Index the sort column for best performance.
 
 ### Batches
@@ -1184,11 +1187,8 @@ plain, err := found.Email.Open(keys)                  // decrypt only where you 
   fails to decrypt with `ErrDecrypt`. It is not bound to its row: swapping values between two
   rows of the same column is not detected. Values scanned with raw SQL don't know their column:
   `Open` returns `ErrUnbound`; use `s.OpenColumn(keys, "patients", "email")`.
-- **Upgrading from v0.1:** v0.1 values (`kc1:`) are not bound to a column. They are still read,
-  and rewritten as `kc2:` on their next write or by `Rotate`. Once `Rotate` has run for every
-  model, call `keys.RejectUnbound()` so old-format values copied around can't be read. Renaming
-  a table or a column with encrypted values needs a re-encryption (read with `OpenColumn` under
-  the old name, write under the new one).
+- **Renaming** a table or a column with encrypted values needs a re-encryption: read with
+  `OpenColumn` under the old name, write under the new one. `kiln gen` warns about it.
 - **Key rotation:** make the new key current and keep the old one for reading, then run
   `kilncrypt.Rotate[Patient](ctx, db, keys)` per model. It re-encrypts in pages, is safe to
   re-run, and afterwards the old key can go. Values re-encrypt on any update too.
@@ -1315,8 +1315,9 @@ applied, err := shards.Migrate(ctx, 4, migrations) // in your migration runner
 A plugin has a `Name` and implements any of these hooks. They run in the order the plugins
 were given, except that a plugin with a `ChecksOnly()` method (`orm.CheckPlugin`, e.g.
 validation) runs its `BeforeWrite` after all the others, so it sees the values they fill in.
-Plugins that record times use `db.Now()`, which follows `orm.WithClock`. An error from a `Before` hook stops the operation before any SQL runs, and the
-caller gets that error unchanged.
+Plugins that record times use `db.Now()`, which follows `orm.WithClock`. An error from a
+`Before` hook stops the operation before any SQL runs, and the caller gets that error
+unchanged.
 
 | Hook | Called | Can |
 |---|---|---|
@@ -1346,6 +1347,28 @@ func (hideArchived) BeforeQuery(ctx context.Context, info *orm.QueryInfo) error 
 }
 
 db := orm.Open(sqlDB, dialect.Postgres(), orm.Use(hideArchived{}))
+```
+
+A write hook sees each record. This one stamps who made the change, on every model with an
+`updated_by` column:
+
+```go
+type stampUser struct{}
+
+func (stampUser) Name() string { return "stamp-user" }
+
+func (stampUser) BeforeWrite(ctx context.Context, w *orm.WriteInfo) error {
+	if _, ok := w.Model.Column("updated_by"); !ok {
+		return nil
+	}
+	if w.Action == orm.ActionUpdate && w.Fields != nil && !slices.Contains(w.Fields, "updated_by") {
+		return nil // a partial update that doesn't write the column
+	}
+	return w.Set("updated_by", userIDFrom(ctx))
+}
+
+db := orm.Open(sqlDB, dialect.Postgres(), orm.Use(stampUser{}), kilnvalidate.Plugin())
+// kilnvalidate is a CheckPlugin: it validates after stampUser has filled the column.
 ```
 
 `info.Action` is `ActionSelect`, `ActionCount`, `ActionUpdate` or `ActionDelete` (soft deletes

@@ -88,7 +88,7 @@ func DiffFor(d dialect.Dialect, current *schema.State, models ...any) (DiffResul
 	}
 
 	for _, name := range current.TableNames() {
-		if !seen[name] && name != "schema_migrations" {
+		if !seen[name] && name != "schema_migrations" && name != sqliteLockTable {
 			res.Notes = append(res.Notes, fmt.Sprintf("table %s has no model; it was left untouched", name))
 		}
 	}
