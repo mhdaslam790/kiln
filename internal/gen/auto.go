@@ -348,7 +348,7 @@ func main() {
 	enums := map[string]string{}
 	for _, name := range pulled {
 		for _, c := range out.State.Tables[name].Columns {
-			base, _ := strings.CutSuffix(c.SQLType, "[]")
+			base := enumName(c.SQLType)
 			if _, ok := out.State.Enums[base]; ok && enums[base] == "" {
 				g := meta.Camel(base)
 				if taken[g] {
@@ -514,6 +514,19 @@ func modelFromTable(pkg, name string, t *schema.TableState, enums map[string]str
 	return b.String()
 }
 
+// enumName is the enum type name in an enum (or enum array) column type:
+// "order status"[] -> order status.
+func enumName(sqlType string) string {
+	base := strings.TrimSuffix(sqlType, "[]")
+	if len(base) > 1 && base[0] == '"' && base[len(base)-1] == '"' {
+		return strings.ReplaceAll(base[1:len(base)-1], `""`, `"`)
+	}
+	return base
+}
+
+// tagValue escapes double quotes for use inside a struct tag's value.
+func tagValue(s string) string { return strings.ReplaceAll(s, `"`, `\"`) }
+
 // arrayElem is the Go element type for a PostgreSQL array of base, or "".
 func arrayElem(base string, enums map[string]string) string {
 	if g := enums[base]; g != "" {
@@ -545,20 +558,20 @@ func goTypeFor(c schema.Column, imports map[string]bool, enums map[string]string
 	var st []string
 	ptr := !c.Required
 	if base, arr := strings.CutSuffix(c.SQLType, "[]"); arr {
-		if elem := arrayElem(base, enums); elem != "" {
+		if elem := arrayElem(enumName(base), enums); elem != "" {
 			imports[kilnpgPath] = true
-			st = append(st, "sqltype:"+c.SQLType)
+			st = append(st, "sqltype:"+tagValue(c.SQLType))
 			if c.Required {
 				st = append(st, "notnull")
 			}
 			return "kilnpg.Array[" + elem + "]", st
 		}
-	} else if g := enums[c.SQLType]; g != "" {
+	} else if g := enums[enumName(c.SQLType)]; g != "" {
 		t = g
 		if ptr {
 			t = "*" + t
 		}
-		return t, []string{"type:text", "sqltype:" + c.SQLType}
+		return t, []string{"type:text", "sqltype:" + tagValue(c.SQLType)}
 	}
 	switch c.Type {
 	case schema.ID, schema.BigInt:
@@ -609,7 +622,7 @@ func goTypeFor(c schema.Column, imports map[string]bool, enums map[string]string
 		st = append(st, "type:text")
 	}
 	if c.SQLType != "" {
-		st = append(st, "sqltype:"+c.SQLType)
+		st = append(st, "sqltype:"+tagValue(c.SQLType))
 	}
 	if ptr {
 		t = "*" + t

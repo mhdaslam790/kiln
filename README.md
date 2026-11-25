@@ -1295,6 +1295,8 @@ Down: func(s *schema.Schema) {
 ```
 
 `kiln diff` and `kiln erd` read these enum steps, so they don't count as raw SQL.
+A type name with spaces or capitals needs its quotes in the model tag, as `kiln pull` writes
+it: `schema:"sqltype:\"order status\""` (`EnumType` adds them for you in migrations).
 `kilnpg.AddEnumValue(s, "mood", "calm")` adds a value. Use the new value in a later
 migration, because PostgreSQL only allows it once the transaction that added it has committed.
 `Array` holds `string`, `bool`, integer and float elements (or named types of them). It can't
