@@ -53,7 +53,12 @@ type Stmt struct {
 // Dialect compiles queries and DDL.
 type Dialect interface {
 	Kind() Kind
+	// Quote quotes an identifier, passing expressions ("COUNT(*) AS n")
+	// through unchanged.
 	Quote(ident string) string
+	// QuoteName quotes a (possibly dotted) name, always: safe for any
+	// input, and right for names with spaces or other odd characters.
+	QuoteName(name string) string
 	// Rebind rewrites '?' placeholders into the dialect's placeholder style.
 	Rebind(sql string) string
 	// Raw compiles a raw statement, rewriting '?' placeholders and

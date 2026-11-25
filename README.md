@@ -554,6 +554,23 @@ ok, err := users.Exists(ctx, q.Eq("email", e))
 if errors.Is(err, orm.ErrNotFound) { ... }
 ```
 
+**Totals**, typed by the column (from [`kiln gen`](#typed-columns-compile-time-checked), or
+`q.Col[int64]("amount")`):
+
+```go
+c := domain.OrderCols
+total, err := orm.Sum(ctx, orders, c.Amount, c.Status.Eq("paid")) // int64, like the column
+avg, err := orm.Avg(ctx, orders, c.Amount)                        // float64 (integers not rounded)
+first, err := orm.Min(ctx, orders, c.CreatedAt)                   // time.Time; orm.ErrNotFound if none
+largest, err := orm.Max(ctx, orders, c.Amount)
+byStatus, err := orm.CountBy(ctx, orders, c.Status)              // map[Status]int64
+revenue, err := orm.SumBy(ctx, orders, c.Country, c.Amount)       // map[string]int64
+```
+
+They apply the same filters, scopes, soft delete and plugins as `FindAll` (with the tenant
+plugin, a tenant only adds up its own rows). `Sum` of nothing is 0. `CountBy`/`SumBy` leave out
+rows where the grouping column is NULL. For anything else, `db.Select` takes any query.
+
 **Filters**: `Eq Ne Lt Lte Gt Gte Like NotLike Null NotNull In NotIn InOf Between`,
 combined with `And Or Not`, plus `Expr("lower(email) = ?", e)` for raw SQL fragments.
 **Modifiers**: `Sort("-col")` (`-` means descending), `Limit`, `Offset`, `Page(page, size)`,
@@ -872,13 +889,27 @@ requests. Ties on the sort column are broken by the primary key. Sorting by a nu
 ascending and first when descending, the same on every database. Pass cursors to clients as
 is. A modified cursor returns `orm.ErrBadCursor`. Index the sort column for best performance.
 
-### Batches
+### Every row, with flat memory
 
 ```go
+for u, err := range users.Iter(ctx, q.Eq("active", true), q.Sort("created_at")) {
+	if err != nil {
+		return err
+	}
+	send(u)
+}
+
 err := users.Each(ctx, 1000, func(u User) error { ...; return nil }, q.Eq("active", true))
 ```
 
-`Each` streams a whole table in primary-key batches with constant memory.
+`Iter` (for `range`) and `Each` (a callback, with your batch size) read a table of any size in
+keyset pages, so memory stays flat. No connection is held while your code runs, so the loop
+body can query and write, even on SQLite. Breaking out of the loop stops reading.
+
+- They follow a `q.Sort` on one field (then the primary key; NULLs last ascending, first
+  descending), or the primary key without one. `q.Limit` caps the total.
+- More sort fields or `q.Offset` are an error rather than a wrong result; use `Cursor` or
+  `Paginate` for those.
 
 ---
 
