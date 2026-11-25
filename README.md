@@ -559,11 +559,12 @@ combined with `And Or Not`, plus `Expr("lower(email) = ?", e)` for raw SQL fragm
 `Select(cols...)`, `Distinct()`, `Group`, `Having`, `Join`, `LeftJoinOn`, `ForUpdate()`
 (row lock), `Unscoped()` (include soft-deleted rows).
 
-`Sort` fields and `Set` targets must be column names (`name`, `users.name`); anything else
-is an error, so a `?sort=` parameter can't inject SQL. Check user input against your own
-list of sortable columns anyway, so users can't sort by columns you don't want exposed.
-Filter field names may be expressions (`q.Gt("COUNT(*)", 5)`), so never build those from user
-input. `Update` of a row that no longer exists writes nothing and returns nil. Add a
+`Sort` fields and `Set` targets are always column names (`name`, `users.name`, even
+`display name`): kiln quotes them, so a `?sort=` parameter can't inject SQL, and an unknown
+name is an error. Check user input against your own list of sortable columns anyway, so users
+can't sort by columns you don't want exposed. Filter field names may be expressions
+(`q.Gt("COUNT(*)", 5)`), so never build those from user input, and a column whose name has a
+space can't be filtered by name (use `q.Expr`). `Update` of a row that no longer exists writes nothing and returns nil. Add a
 `db:"version,lock"` field to get `ErrStale` instead.
 
 Write `?` placeholders in `Expr` and raw SQL. They are converted to `$1`/`@p1` per dialect

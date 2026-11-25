@@ -258,7 +258,7 @@ func (d *sqlDialect) changeColumn(o schema.ChangeColumn) ([]Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		s := "ALTER TABLE " + t + " ALTER COLUMN " + d.Quote(c.Name) + " " + typ
+		s := "ALTER TABLE " + t + " ALTER COLUMN " + d.ident(c.Name) + " " + typ
 		if c.Required {
 			s += " NOT NULL"
 		} else {
@@ -273,7 +273,7 @@ func (d *sqlDialect) changeColumn(o schema.ChangeColumn) ([]Stmt, error) {
 				return nil, err
 			}
 			stmts = append(stmts, Stmt{SQL: "ALTER TABLE " + t + " ADD CONSTRAINT " +
-				d.Quote("DF_"+o.Table+"_"+c.Name) + " DEFAULT " + lit + " FOR " + d.Quote(c.Name)})
+				d.Quote("DF_"+o.Table+"_"+c.Name) + " DEFAULT " + lit + " FOR " + d.ident(c.Name)})
 		}
 		return stmts, nil
 	}
@@ -281,7 +281,7 @@ func (d *sqlDialect) changeColumn(o schema.ChangeColumn) ([]Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	col := d.Quote(c.Name)
+	col := d.ident(c.Name)
 	parts := []string{"ALTER COLUMN " + col + " TYPE " + typ}
 	if c.Required {
 		parts = append(parts, "ALTER COLUMN "+col+" SET NOT NULL")
@@ -307,7 +307,7 @@ func (d *sqlDialect) columnDef(c schema.Column, alter bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s := d.Quote(c.Name) + " " + typ
+	s := d.ident(c.Name) + " " + typ
 	if c.Unsigned && d.kind == KindMySQL {
 		s += " UNSIGNED"
 	}
