@@ -72,6 +72,13 @@ func TestContextAndLookup(t *testing.T) {
 	if _, err := r.DB(ctx); !errors.Is(err, ErrNoKey) {
 		t.Fatalf("no key: %v", err)
 	}
+	if _, err := r.DB(With(ctx, "")); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("empty key: %v", err)
+	}
+	custom, _ := New(shards, Key(func(context.Context) (string, bool) { return "", true }))
+	if _, err := custom.DB(ctx); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("empty key from Key: %v", err)
+	}
 	if db, err := r.DB(With(ctx, "eu-42")); err != nil || db != shards["eu"] {
 		t.Fatalf("eu: %v", err)
 	}

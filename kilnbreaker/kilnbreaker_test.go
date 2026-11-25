@@ -194,3 +194,25 @@ func BenchmarkOpen(b *testing.B) {
 		_ = br.Allow(ctx)
 	}
 }
+
+func TestCancelledTrialDoesNotClose(t *testing.T) {
+	b, c := newTest(Failures(1, time.Second), Cooldown(time.Second))
+	_ = run(b, errDown) // open
+	c.advance(2 * time.Second)
+	cctx, cancel := context.WithCancel(ctx)
+	if err := b.Allow(cctx); err != nil { // the trial
+		t.Fatal(err)
+	}
+	cancel()
+	b.Done(cctx, fmt.Errorf("read: %w", context.Canceled))
+	if s := b.State(); s != HalfOpen {
+		t.Fatalf("cancelled trial moved the breaker to %s", s)
+	}
+	// The trial slot is free again: the next query is the trial.
+	if err := run(b, nil); err != nil {
+		t.Fatalf("next trial refused: %v", err)
+	}
+	if b.State() != Closed {
+		t.Fatal("answered trial did not close the breaker")
+	}
+}

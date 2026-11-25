@@ -96,6 +96,15 @@ type AfterWritePlugin interface {
 	AfterWrite(ctx context.Context, w *WriteInfo) error
 }
 
+// CheckPlugin is a WritePlugin that only checks records, such as
+// validation. Its BeforeWrite runs after every other plugin's, whatever the
+// order the plugins were given in, so it sees the values they fill in (a
+// tenant id, timestamps).
+type CheckPlugin interface {
+	WritePlugin
+	ChecksOnly()
+}
+
 // ReadPlugin runs after kiln loaded records of a model: Find, FindAll,
 // FindByID, Each, Cursor, Paginate, preloads and cached results. It is not
 // called for raw SQL scanned into structs (DB.Query) or when nothing was
@@ -157,7 +166,13 @@ func Use(p Plugin) Option {
 			hooked = true
 		}
 		if wp, ok := p.(WritePlugin); ok {
-			db.writePlugins = append(db.writePlugins, wp)
+			if _, check := p.(CheckPlugin); check {
+				db.writePlugins = append(db.writePlugins, wp)
+				db.checkPlugins++
+			} else { // before the check plugins
+				i := len(db.writePlugins) - db.checkPlugins
+				db.writePlugins = append(db.writePlugins[:i], append([]WritePlugin{wp}, db.writePlugins[i:]...)...)
+			}
 			hooked = true
 		}
 		if rp, ok := p.(RoutePlugin); ok {

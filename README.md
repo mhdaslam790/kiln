@@ -1102,7 +1102,10 @@ if errors.As(err, &verr) {
 
 - `errors.Is(err, kilnvalidate.ErrInvalid)` matches any validation failure.
 - Inserts (including each `InsertAll` record) and full updates check the whole record.
-  `Update(ctx, &u, "Email")` checks only the fields it writes.
+  `Update(ctx, &u, "Email")` checks only the fields it writes (including fields of embedded
+  structs).
+- Validation runs after the other plugins, whatever their order in `orm.Open`, so a
+  `validate:"required"` tenant id filled in by `tenant.Plugin` passes.
 - Bring your own validator, with custom rules or translations:
   `kilnvalidate.Plugin(kilnvalidate.WithValidator(v))`. `FieldError.Err` is the validator's
   own error, for `Translate`.
@@ -1213,7 +1216,10 @@ slog.Info("signup", "user", kilnmask.Log(u)) // masked only if the line is logge
 - Rules: `full`, `email`, `first:N`, `last:N`, plus your own with
   `kilnmask.WithRule("iban", fn)`. An unknown rule hides the whole value (fails closed).
 - The hidden part is always `****`, so the value's length doesn't leak.
-- Nested structs, pointers and slices are masked too; nothing is copied that doesn't need to be.
+- Nested structs, pointers, slices, maps and `any` fields are masked too; nothing is copied
+  that doesn't need to be. Cyclic data (a child pointing back to its parent) is copied safely.
+- A `mask` tag on a field that isn't a string (`int64`, `[]byte`, a struct) clears it to its
+  zero value: no rule can partly show it, so it is hidden completely.
 - Works on any struct, not only kiln models. Pair it with `kilncrypt` for data that must also
   be encrypted at rest.
 
@@ -1300,12 +1306,16 @@ applied, err := shards.Migrate(ctx, 4, migrations) // in your migration runner
   Shard by tenant with `kilnshard.Key(...)` reading `tenant.From(ctx)`.
 - **Not possible across shards:** transactions, joins, single-statement queries over all
   shards (use `Each`). Moving keys between shards is up to you: copy, then change `Lookup`.
+- An empty key (`kilnshard.With(ctx, "")`, e.g. an anonymous request) is `ErrNoKey`, like a
+  missing one, rather than sending all such data to one shard.
 - Picking a shard costs ~60ns, no allocations.
 
 ### Writing a plugin
 
 A plugin has a `Name` and implements any of these hooks. They run in the order the plugins
-were given. An error from a `Before` hook stops the operation before any SQL runs, and the
+were given, except that a plugin with a `ChecksOnly()` method (`orm.CheckPlugin`, e.g.
+validation) runs its `BeforeWrite` after all the others, so it sees the values they fill in.
+Plugins that record times use `db.Now()`, which follows `orm.WithClock`. An error from a `Before` hook stops the operation before any SQL runs, and the
 caller gets that error unchanged.
 
 | Hook | Called | Can |

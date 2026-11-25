@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -59,13 +60,18 @@ type plugin struct{ v *validator.Validate }
 
 func (p *plugin) Name() string { return "kilnvalidate" }
 
+// ChecksOnly makes kiln run validation after the other plugins have filled
+// in their values (a tenant id, ...), whatever the plugin order.
+func (p *plugin) ChecksOnly() {}
+
 func (p *plugin) BeforeWrite(ctx context.Context, w *orm.WriteInfo) error {
 	var err error
 	if w.Action == orm.ActionUpdate && w.Fields != nil {
 		names := make([]string, 0, len(w.Fields))
+		rt := reflect.TypeOf(w.Record).Elem()
 		for _, col := range w.Fields {
 			if f, ok := w.Model.Column(col); ok {
-				names = append(names, f.Name)
+				names = append(names, path(rt, f.Name))
 			}
 		}
 		err = p.v.StructPartialCtx(ctx, w.Record, names...)
@@ -88,6 +94,26 @@ func (p *plugin) BeforeWrite(ctx context.Context, w *orm.WriteInfo) error {
 		out.Fields = append(out.Fields, f)
 	}
 	return out
+}
+
+// path returns the field's name as the validator wants it in a partial
+// check: through embedded structs ("Base.Code"). A plain "Code" would match
+// nothing there, and the field would silently go unchecked.
+func path(t reflect.Type, name string) string {
+	sf, ok := t.FieldByName(name)
+	if !ok || len(sf.Index) == 1 {
+		return name
+	}
+	parts := make([]string, len(sf.Index))
+	for i, idx := range sf.Index {
+		f := t.Field(idx)
+		parts[i] = f.Name
+		t = f.Type
+		if t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+	}
+	return strings.Join(parts, ".")
 }
 
 func fieldByName(m *orm.ModelInfo, name string) (orm.FieldInfo, bool) {

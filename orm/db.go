@@ -170,6 +170,11 @@ func WithRetry(n int) Option { return func(db *DB) { db.retries = n } }
 // WithClock overrides time.Now for timestamps (useful in tests).
 func WithClock(now func() time.Time) Option { return func(db *DB) { db.now = now } }
 
+// Now returns the current time from the DB's clock (WithClock, or
+// time.Now), as used for created_at and updated_at. Plugins that record
+// times use it too, so a fixed clock in tests applies everywhere.
+func (db *DB) Now() time.Time { return db.now() }
+
 // DB is the entry point of the ORM. It is safe for concurrent use.
 type DB struct {
 	sql          *sql.DB
@@ -178,7 +183,8 @@ type DB struct {
 	guards       []GuardPlugin
 	routes       []RoutePlugin
 	queryPlugins []QueryPlugin
-	writePlugins []WritePlugin
+	writePlugins []WritePlugin // CheckPlugins last
+	checkPlugins int           // how many of writePlugins are CheckPlugins
 	readPlugins  []ReadPlugin
 	txPlugins    []TxPlugin
 	// afterWritePlugins: AfterWritePlugin; makes single-record writes transactional
@@ -246,6 +252,7 @@ type txState struct {
 	tx      *sql.Tx
 	mu      sync.Mutex
 	touched map[string]bool // tables written, invalidated in the cache on commit
+	wrote   atomic.Bool     // a write ran (route plugins are told again on commit)
 }
 
 func (db *DB) txFrom(ctx context.Context) *txState {
@@ -387,6 +394,12 @@ func (db *DB) commit(ctx context.Context, st *txState) error {
 	err := st.tx.Commit()
 	if err == nil && db.cache != nil {
 		_ = db.cache.bump(ctx, st.touchedTables())
+	}
+	// Route plugins were told at each write; tell them again now, as the
+	// changes only become visible (and replicate) from the commit on. A
+	// transaction longer than kilnrw's window would otherwise end it early.
+	if err == nil && len(db.routes) != 0 && st.wrote.Load() {
+		db.wrote(ctx)
 	}
 	return err
 }
@@ -544,6 +557,9 @@ func (db *DB) queryStmt(ctx context.Context, s dialect.Stmt, o op) (*sql.Rows, e
 }
 
 func (db *DB) wrote(ctx context.Context) {
+	if st := db.txFrom(ctx); st != nil {
+		st.wrote.Store(true)
+	}
 	for _, r := range db.routes {
 		r.Wrote(ctx)
 	}

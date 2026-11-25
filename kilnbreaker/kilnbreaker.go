@@ -189,7 +189,9 @@ func (b *Breaker) Allow(context.Context) error {
 
 // Done implements orm.GuardPlugin.
 func (b *Breaker) Done(ctx context.Context, err error) {
-	failed := err != nil && !errors.Is(err, ErrOpen) && ctx.Err() != context.Canceled && b.isFailure(err)
+	// Cancelled by the caller: the database neither failed nor answered.
+	cancelled := err != nil && (errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled)
+	failed := err != nil && !cancelled && !errors.Is(err, ErrOpen) && b.isFailure(err)
 	s := State(b.state.Load())
 	if s == Closed && !failed {
 		return // fast path: no lock
@@ -211,9 +213,11 @@ func (b *Breaker) Done(ctx context.Context, err error) {
 		if b.inflight > 0 {
 			b.inflight--
 		}
-		if failed {
+		switch {
+		case cancelled: // a trial gave no answer: let another query try
+		case failed:
 			to = b.open(b.now())
-		} else { // answered (also with an ordinary query error): the database is back
+		default: // answered (also with an ordinary query error): the database is back
 			b.succeeded++
 			if b.succeeded >= b.trials {
 				b.set(Closed)
