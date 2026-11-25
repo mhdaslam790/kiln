@@ -97,7 +97,7 @@ func buildState(cols []colRow, idx []idxRow, fks []fkRow) *schema.State {
 		return cols[i].Position < cols[j].Position
 	})
 	for _, c := range cols {
-		if c.Table == "schema_migrations" {
+		if c.Table == "schema_migrations" || c.Table == sqliteLockTable {
 			continue
 		}
 		t := st.Tables[c.Table]

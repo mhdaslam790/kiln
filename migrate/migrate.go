@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mhdaslam790/kiln/dialect"
@@ -381,11 +382,14 @@ func (m *Migrator) exec(ctx context.Context, s *schema.Schema) error {
 const lockName = "kiln_migrate"
 
 // locked holds a database-level lock so that concurrently starting
-// instances do not run migrations twice. SQLite relies on its file lock.
+// instances do not run migrations twice.
 func (m *Migrator) locked(ctx context.Context, fn func() error) error {
 	k := m.db.Dialect().Kind()
-	if m.noLock || k == dialect.KindSQLite {
+	if m.noLock {
 		return fn()
+	}
+	if k == dialect.KindSQLite {
+		return m.sqliteLocked(ctx, fn)
 	}
 	conn, err := m.db.SQL().Conn(ctx)
 	if err != nil {
@@ -415,6 +419,48 @@ func (m *Migrator) locked(ctx context.Context, fn func() error) error {
 	}
 	defer conn.ExecContext(context.WithoutCancel(ctx), unlock) //nolint:errcheck
 	return fn()
+}
+
+// SQLite has no lock functions: a row in a lock table is the lock. A lock
+// older than sqliteLockStale (a crashed process) is taken over.
+const (
+	sqliteLockTable = "kiln_migrate_lock"
+	sqliteLockStale = 10 * time.Minute
+	sqliteLockWait  = 5 * time.Minute
+)
+
+func (m *Migrator) sqliteLocked(ctx context.Context, fn func() error) error {
+	db := m.db.SQL()
+	if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS "+sqliteLockTable+" (id INTEGER PRIMARY KEY, since INTEGER NOT NULL)"); err != nil && !busy(err) {
+		return fmt.Errorf("migrate: lock table: %w", err)
+	}
+	deadline := time.Now().Add(sqliteLockWait)
+	for {
+		now := time.Now()
+		_, err := db.ExecContext(ctx, "INSERT INTO "+sqliteLockTable+" (id, since) VALUES (1, ?)", now.UnixNano())
+		if err == nil {
+			break
+		}
+		// Held by another instance (or the database is busy): take over a
+		// stale lock, otherwise wait.
+		_, _ = db.ExecContext(ctx, "DELETE FROM "+sqliteLockTable+" WHERE id = 1 AND since < ?", now.Add(-sqliteLockStale).UnixNano())
+		if now.After(deadline) {
+			return fmt.Errorf("migrate: timed out waiting for migration lock (%s; delete its row if no migration is running): %w", sqliteLockTable, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	defer db.ExecContext(context.WithoutCancel(ctx), "DELETE FROM "+sqliteLockTable+" WHERE id = 1") //nolint:errcheck
+	return fn()
+}
+
+// busy reports a SQLite "database is locked" error, retried by the caller.
+func busy(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "SQLITE_BUSY")
 }
 
 // needsNoTx reports whether ops must run outside a transaction.

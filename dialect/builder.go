@@ -464,12 +464,14 @@ func (b *buf) selectQuery(qq q.Query) error {
 			if i > 0 {
 				b.w(", ")
 			}
-			b.w(d.ident(s.Field))
+			dir := " ASC"
 			if s.Desc {
-				b.w(" DESC")
-			} else {
-				b.w(" ASC")
+				dir = " DESC"
 			}
+			if s.NullsLarge { // portable: no NULLS FIRST/LAST in MySQL or SQL Server
+				b.w("CASE WHEN ", d.ident(s.Field), " IS NULL THEN 1 ELSE 0 END", dir, ", ")
+			}
+			b.w(d.ident(s.Field), dir)
 		}
 	}
 	switch {

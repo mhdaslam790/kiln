@@ -37,6 +37,9 @@ type JoinClause struct {
 type SortField struct {
 	Field string
 	Desc  bool
+	// NullsLarge orders NULLs as larger than every value: last when
+	// ascending, first when descending, the same on every database.
+	NullsLarge bool
 }
 
 // Query is the full description of a SELECT (and the scope of UPDATE/DELETE).
