@@ -77,6 +77,8 @@ type Model struct {
 	Fields []*Field
 	// PK is the single primary key; nil when the key is composite (see PKs).
 	PK *Field
+	// PKQualified is "table.pk_column" for PK (built once, used per query).
+	PKQualified string
 	// PKs lists every primary key field in declaration order.
 	PKs       []*Field
 	CreatedAt *Field
@@ -136,6 +138,7 @@ func Of(t reflect.Type) (*Model, error) {
 	}
 	if len(m.PKs) == 1 {
 		m.PK = m.PKs[0]
+		m.PKQualified = m.Table + "." + m.PK.Column
 	}
 	if m.PK != nil && !m.PK.Auto && isInteger(m.PK.Type) && !m.PK.NoAuto {
 		m.PK.Auto = true

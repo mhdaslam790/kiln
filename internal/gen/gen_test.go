@@ -93,18 +93,24 @@ func TestGenerators(t *testing.T) {
 			t.Errorf("model missing %q:\n%s", want, model)
 		}
 	}
+	must(p.Create("Report", []string{"table_name:string"}, CreateOptions{Table: "report_x"}))
+	if r := strings.Join(strings.Fields(read(t, p.path("models/report.go"))), " "); !strings.Contains(r, "TableNameCol string `db:\"table_name\"`") {
+		t.Errorf("table_name column clashes with TableName():\n%s", r)
+	}
 	if err := p.Create("BlogPost", nil, CreateOptions{}); err == nil {
 		t.Error("duplicate create should fail")
 	}
 
-	must(p.AddColumns("BlogPost", []string{"views:int", "meta:json"}))
+	must(p.AddColumns("BlogPost", []string{"views:int", "meta:json", "summary:text:null"}))
 	must(p.RenameColumn("BlogPost", "views", "view_count"))
+	must(p.RenameColumn("BlogPost", "summary", "abstract")) // keeps schema:"type:text" (kiln diff saw a change otherwise)
 	must(p.DropColumns("BlogPost", []string{"published_at"}))
 	must(p.AddIndex("BlogPost", []string{"title"}, true))
 
 	model = strings.Join(strings.Fields(read(t, p.path("models/blog_post.go"))), " ")
 	if !strings.Contains(model, "ViewCount int `db:\"view_count\"`") || strings.Contains(model, "PublishedAt") ||
-		!strings.Contains(model, "Meta map[string]any `db:\"meta,json\"`") {
+		!strings.Contains(model, "Meta map[string]any `db:\"meta,json\"`") ||
+		!strings.Contains(model, "Abstract *string `db:\"abstract\" schema:\"type:text\"`") {
 		t.Errorf("model after edits:\n%s", model)
 	}
 
@@ -115,17 +121,39 @@ func TestGenerators(t *testing.T) {
 	}
 	want := []string{
 		"20260102030405_create_blog_posts.go",
-		"20260102030406_add_views_meta_to_blog_posts.go",
-		"20260102030407_rename_views_to_view_count_in_blog_posts.go",
-		"20260102030408_drop_published_at_from_blog_posts.go",
-		"20260102030409_add_index_uniq_blog_posts_title.go",
+		"20260102030406_create_report_x.go",
+		"20260102030407_add_views_meta_summary_to_blog_posts.go",
+		"20260102030408_rename_views_to_view_count_in_blog_posts.go",
+		"20260102030409_rename_summary_to_abstract_in_blog_posts.go",
+		"20260102030410_drop_published_at_from_blog_posts.go",
+		"20260102030411_add_index_uniq_blog_posts_title.go",
 		"migrations.go",
 	}
 	if strings.Join(names, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("migrations:\n%s", strings.Join(names, "\n"))
 	}
-	drop := read(t, p.path("db/migrations", want[3]))
+	drop := read(t, p.path("db/migrations", want[5]))
 	if !strings.Contains(drop, `a.DateTime("published_at")`) {
 		t.Errorf("drop-column down should restore a nullable datetime:\n%s", drop)
+	}
+}
+
+func TestRenameTagKeepsEverything(t *testing.T) {
+	for _, c := range []struct{ old, want string }{
+		{"`db:\"bio\" schema:\"type:text\"`", "`db:\"about\" schema:\"type:text\"`"},
+		{"`db:\"version,lock\"`", "`db:\"rev,lock\"`"},
+		{"`db:\"email\" validate:\"required,email\" mask:\"email\"`", "`db:\"mail\" validate:\"required,email\" mask:\"email\"`"},
+		{"`db:\"prefs,json\" schema:\"type:text\"`", "`db:\"settings,json\" schema:\"type:text\"`"},
+		{"`mask:\"full\"`", "`db:\"token\" mask:\"full\"`"},
+		{"", "`db:\"token\"`"},
+	} {
+		col := map[string]string{"`db:\"bio\" schema:\"type:text\"`": "about", "`db:\"version,lock\"`": "rev",
+			"`db:\"email\" validate:\"required,email\" mask:\"email\"`": "mail", "`db:\"prefs,json\" schema:\"type:text\"`": "settings"}[c.old]
+		if col == "" {
+			col = "token"
+		}
+		if got := renameTag(c.old, col, false); got != c.want {
+			t.Errorf("renameTag(%s) = %s, want %s", c.old, got, c.want)
+		}
 	}
 }

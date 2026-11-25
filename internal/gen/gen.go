@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/mhdaslam790/kiln/dialect"
@@ -205,11 +206,11 @@ func (p *Project) RenameColumn(model, from, to string) error {
 		return fmt.Errorf("no field for column %q in model %s", from, model)
 	}
 	start, end := mf.offset(f.Names[0].Pos()), mf.offset(f.End())
-	tag := "`db:\"" + to + "\"`"
-	if isJSON {
-		tag = "`db:\"" + to + ",json\"`"
+	old := ""
+	if f.Tag != nil {
+		old = f.Tag.Value
 	}
-	line := meta.Camel(to) + " " + mf.exprString(f.Type) + " " + tag
+	line := fieldName(to) + " " + mf.exprString(f.Type) + " " + renameTag(old, to, isJSON)
 	src := string(mf.src[:start]) + line + string(mf.src[end:])
 	if err := writeFormatted(mf.path, src); err != nil {
 		return err
@@ -222,6 +223,31 @@ func (p *Project) RenameColumn(model, from, to string) error {
 		p.regenCols()
 	}
 	return err
+}
+
+// renameTag returns the struct tag (with backticks) for a field whose
+// column is renamed to column. Only the db tag's name changes: its options
+// (json, primary, lock, ...) and every other key (schema types, validate,
+// mask, json, ...) are kept.
+func renameTag(old, column string, isJSON bool) string {
+	raw := strings.Trim(old, "`")
+	if db, ok := reflect.StructTag(raw).Lookup("db"); ok {
+		opts := ""
+		if i := strings.IndexByte(db, ','); i >= 0 {
+			opts = db[i:]
+		}
+		oldKV := `db:"` + db + `"`
+		return "`" + strings.Replace(raw, oldKV, `db:"`+column+opts+`"`, 1) + "`"
+	}
+	db := `db:"` + column
+	if isJSON {
+		db += ",json"
+	}
+	db += `"`
+	if raw = strings.TrimSpace(raw); raw != "" {
+		db += " " + raw
+	}
+	return "`" + db + "`"
 }
 
 // AddIndex writes a create-index migration.

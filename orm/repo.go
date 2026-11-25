@@ -71,7 +71,7 @@ func (r *Repo[T]) FindByID(ctx context.Context, id any, qs ...q.Querier) (T, err
 		var zero T
 		return zero, pkMissing(r.m)
 	}
-	return r.Find(ctx, append([]q.Querier{q.Eq(r.m.Table+"."+r.m.PK.Column, id)}, qs...)...)
+	return r.Find(ctx, append([]q.Querier{q.Eq(r.m.PKQualified, id)}, qs...)...)
 }
 
 // FindByPK finds by a (possibly composite) primary key, values in

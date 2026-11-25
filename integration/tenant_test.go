@@ -107,6 +107,14 @@ func TestTenant(t *testing.T) {
 		}
 		got.Name = "ann b"
 		must(t, users.Update(acme, &got, "Name")) // column not written: fine
+		got.Age = 31
+		must(t, users.Update(acme, &got)) // full update of the tenant's own record (writes tenant_id = its own value)
+		if _, err := users.UpdateAny(acme, q.Eq("name", "ann b"), q.Set("tenant_id", 1)); err != nil {
+			t.Fatalf("UpdateAny setting the own tenant: %v", err) // a no-op, allowed
+		}
+		if _, err := users.UpdateAny(acme, q.Eq("name", "ann b"), q.Inc("tenant_id", 1)); !errors.Is(err, tenant.ErrCrossTenant) {
+			t.Fatalf("UpdateAny incrementing tenant_id: %v", err)
+		}
 		if n, err := users.UpdateAny(globex, q.Like("email", "%"), q.Set("age", 9)); err != nil || n != 2 {
 			t.Fatalf("UpdateAny(globex) = %d, %v", n, err)
 		}

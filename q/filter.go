@@ -106,6 +106,26 @@ func Expr(sql string, args ...any) Filter { return ExprFilter{SQL: sql, Args: ar
 
 // And combines filters with AND. Nil filters are skipped and nested ANDs flattened.
 func And(filters ...Filter) Filter {
+	// Fast path: at most one plain filter (e.g. a condition and a nil) is
+	// returned as is, without allocating.
+	var only Filter
+	n := 0
+	for _, f := range filters {
+		switch f.(type) {
+		case nil:
+		case AndFilter:
+			n = 2 // flatten below
+		default:
+			only = f
+			n++
+		}
+	}
+	switch n {
+	case 0:
+		return nil
+	case 1:
+		return only
+	}
 	var out []Filter
 	for _, f := range filters {
 		switch v := f.(type) {

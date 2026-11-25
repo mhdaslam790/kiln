@@ -164,7 +164,13 @@ func (p *plugin) BeforeQuery(ctx context.Context, info *orm.QueryInfo) error {
 		return fmt.Errorf("%w (%s %s)", err, info.Action, info.Table)
 	}
 	for _, m := range info.Set {
-		if m.Field == p.column || m.Field == p.qualify(info.Table) {
+		if m.Field != p.column && m.Field != p.qualify(info.Table) {
+			continue
+		}
+		// Setting the column to the context's own tenant changes nothing (a
+		// full Update of a record writes every column; BeforeWrite already
+		// checked its value). Anything else would move rows to another tenant.
+		if m.Kind != q.MutSet || !sameTenant(m.Value, id) {
 			return fmt.Errorf("%w: %s cannot be changed by an update", ErrCrossTenant, p.column)
 		}
 	}
@@ -226,6 +232,28 @@ func isZero(v any) bool {
 		return rv.IsNil() || rv.Elem().IsZero()
 	}
 	return rv.IsZero()
+}
+
+// sameTenant reports whether a value set on the tenant column is the
+// context's tenant id, converting between number types (an int context id
+// and an int64 column) and comparing other types by their text.
+func sameTenant(v, id any) bool {
+	v, id = deref(v), deref(id)
+	if v == nil || id == nil {
+		return false
+	}
+	if equal(v, id) {
+		return true
+	}
+	rv, rid := reflect.ValueOf(v), reflect.ValueOf(id)
+	if num(rv.Kind()) && num(rid.Kind()) && rid.CanConvert(rv.Type()) {
+		return equal(v, rid.Convert(rv.Type()).Interface()) && equal(id, rv.Convert(rid.Type()).Interface())
+	}
+	return fmt.Sprint(v) == fmt.Sprint(id)
+}
+
+func num(k reflect.Kind) bool {
+	return (k >= reflect.Int && k <= reflect.Uint64) || k == reflect.Float32 || k == reflect.Float64
 }
 
 // equal compares two values of the tenant field, looking through pointers.
