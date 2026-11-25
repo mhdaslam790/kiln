@@ -559,11 +559,12 @@ combined with `And Or Not`, plus `Expr("lower(email) = ?", e)` for raw SQL fragm
 `Select(cols...)`, `Distinct()`, `Group`, `Having`, `Join`, `LeftJoinOn`, `ForUpdate()`
 (row lock), `Unscoped()` (include soft-deleted rows).
 
-`Sort` fields and `Set` targets must be column names (`name`, `users.name`); anything else
-is an error, so a `?sort=` parameter can't inject SQL. Check user input against your own
-list of sortable columns anyway, so users can't sort by columns you don't want exposed.
-Filter field names may be expressions (`q.Gt("COUNT(*)", 5)`), so never build those from user
-input. `Update` of a row that no longer exists writes nothing and returns nil. Add a
+`Sort` fields and `Set` targets are always column names (`name`, `users.name`, even
+`display name`): kiln quotes them, so a `?sort=` parameter can't inject SQL, and an unknown
+name is an error. Check user input against your own list of sortable columns anyway, so users
+can't sort by columns you don't want exposed. Filter field names may be expressions
+(`q.Gt("COUNT(*)", 5)`), so never build those from user input, and a column whose name has a
+space can't be filtered by name (use `q.Expr`). `Update` of a row that no longer exists writes nothing and returns nil. Add a
 `db:"version,lock"` field to get `ErrStale` instead.
 
 Write `?` placeholders in `Expr` and raw SQL. They are converted to `$1`/`@p1` per dialect
@@ -1161,7 +1162,7 @@ type Patient struct {
 }
 
 p := Patient{Email: kilncrypt.NewString("ann@clinic.io")}
-patients.Insert(ctx, &p)                              // stores "kc1:..." ciphertext
+patients.Insert(ctx, &p)                              // stores "kc2:..." ciphertext
 found, err := patients.Find(ctx, email.Eq("Ann@Clinic.io")) // exact match, no decryption
 plain, err := found.Email.Open(keys)                  // decrypt only where you need it
 ```
@@ -1173,7 +1174,18 @@ plain, err := found.Email.Open(keys)                  // decrypt only where you 
   (booleans, countries).
 - **Safe by default:** loaded values stay encrypted until `Open`; they print, log and marshal
   to JSON as `"[encrypted]"`. Without the plugin, writing a `NewString` fails with
-  `ErrNotSealed` instead of storing plaintext. For `UpdateAny`, pass `keys.Seal(v)`.
+  `ErrNotSealed` instead of storing plaintext. `UpdateAny(ctx, where, q.Set("email",
+  kilncrypt.NewString(v)))` is sealed for you; for raw SQL use `keys.SealColumn(v, table, column)`.
+- **Bound to its column:** each value is authenticated together with its table and column, so a
+  value copied into another column or table (by someone with write access to the database)
+  fails to decrypt with `ErrDecrypt`. It is not bound to its row: swapping values between two
+  rows of the same column is not detected. Values scanned with raw SQL don't know their column:
+  `Open` returns `ErrUnbound`; use `s.OpenColumn(keys, "patients", "email")`.
+- **Upgrading from v0.1:** v0.1 values (`kc1:`) are not bound to a column. They are still read,
+  and rewritten as `kc2:` on their next write or by `Rotate`. Once `Rotate` has run for every
+  model, call `keys.RejectUnbound()` so old-format values copied around can't be read. Renaming
+  a table or a column with encrypted values needs a re-encryption (read with `OpenColumn` under
+  the old name, write under the new one).
 - **Key rotation:** make the new key current and keep the old one for reading, then run
   `kilncrypt.Rotate[Patient](ctx, db, keys)` per model. It re-encrypts in pages, is safe to
   re-run, and afterwards the old key can go. Values re-encrypt on any update too.
@@ -1292,7 +1304,7 @@ applied, err := shards.Migrate(ctx, 4, migrations) // in your migration runner
 
 ### Writing a plugin
 
-A plugin has a `Name` and implements any of three hooks. They run in the order the plugins
+A plugin has a `Name` and implements any of these hooks. They run in the order the plugins
 were given. An error from a `Before` hook stops the operation before any SQL runs, and the
 caller gets that error unchanged.
 
@@ -1302,6 +1314,7 @@ caller gets that error unchanged.
 | `BeforeWrite(ctx, *orm.WriteInfo) error` | for each record inserted or updated, after the model's own `Before` hooks | read and set fields (`w.Get`, `w.Set`) |
 | `AfterQuery(ctx, orm.Event)` | after every statement and cache hit | observe (logging, tracing, metrics) |
 | `AfterWrite(ctx, *orm.WriteInfo) error` | after each record is inserted, updated or deleted, inside the same transaction | record or react to the change (audit); `w.SetValue` / `w.Value` carry data from `BeforeWrite` |
+| `AfterRead(ctx, *orm.ReadInfo) error` | after records of a model are loaded (finds, pages, preloads, cached results; not raw SQL) | adjust loaded fields (`r.Field(i, column)` returns a pointer) |
 | `AfterBegin(ctx, *sql.Tx) error` | when a top-level transaction starts | per-transaction session settings (row-level security) |
 | `Allow(ctx) error` / `Done(ctx, err)` | around every statement and transaction start | decide whether to reach the database at all (circuit breaker) |
 | `Wrote(ctx)` / `ReadPrimary(ctx) bool` | after each successful write / before each replica read | route reads to the primary (read-your-writes) |

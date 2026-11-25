@@ -44,7 +44,9 @@ func (d *sqlDialect) placeholder(n int) string {
 
 func (d *sqlDialect) quoteOne(s string) string {
 	switch d.kind {
-	case KindMySQL:
+	case KindMySQL, KindSQLite:
+		// SQLite: a "double-quoted" name that is not a column silently
+		// becomes a string literal; a `backquoted` one is an error.
 		return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 	case KindMSSQL:
 		return "[" + strings.ReplaceAll(s, "]", "]]") + "]"
@@ -56,14 +58,11 @@ func (d *sqlDialect) quoteOne(s string) string {
 // and anything that looks like an expression (parens, spaces, quotes) is
 // passed through untouched so callers can select e.g. "COUNT(*) AS n".
 func (d *sqlDialect) Quote(ident string) string {
-	if ident == "*" || ident == "" {
-		return ident
-	}
-	if strings.ContainsAny(ident, "() '\"`[]+-/,:") || isNumber(ident) {
-		return ident
-	}
-	if q, ok := d.quoted.Load(ident); ok {
+	if q, ok := d.quoted.Load(ident); ok { // only names are cached
 		return q.(string)
+	}
+	if ident == "*" || ident == "" || isExpr(ident) {
+		return ident
 	}
 	parts := strings.Split(ident, ".")
 	for i, p := range parts {
@@ -78,6 +77,41 @@ func (d *sqlDialect) Quote(ident string) string {
 		}
 	}
 	return q
+}
+
+// isExpr reports whether Quote passes s through as SQL: it has expression
+// syntax (parens, spaces, quotes, operators) or is a number.
+func isExpr(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if exprByte[s[i]] {
+			return true
+		}
+	}
+	return isNumber(s)
+}
+
+var exprByte = func() (t [256]bool) {
+	for _, c := range []byte("() '\"`[]+/,:\t\n\r") {
+		t[c] = true
+	}
+	return t
+}()
+
+// ident quotes a name in a position that can only hold a name (sort field,
+// SET target, insert/returning column, column definition): always quoted
+// and escaped, so it is safe for any input and works for any column name.
+func (d *sqlDialect) ident(s string) string {
+	if q, ok := d.quoted.Load(s); ok {
+		return q.(string)
+	}
+	if !isExpr(s) {
+		return d.Quote(s) // quotes and caches
+	}
+	parts := strings.Split(s, ".")
+	for i, p := range parts {
+		parts[i] = d.quoteOne(p)
+	}
+	return strings.Join(parts, ".")
 }
 
 func (d *sqlDialect) Rebind(sql string) string {
@@ -430,10 +464,7 @@ func (b *buf) selectQuery(qq q.Query) error {
 			if i > 0 {
 				b.w(", ")
 			}
-			if !isColumn(s.Field) {
-				return fmt.Errorf("dialect: sort by %q: not a column name (use q.SQL for an ordering expression)", s.Field)
-			}
-			b.w(d.Quote(s.Field))
+			b.w(d.ident(s.Field))
 			if s.Desc {
 				b.w(" DESC")
 			} else {
@@ -504,7 +535,7 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 			b.w(" () VALUES ()")
 		case KindMSSQL:
 			if ret != "" {
-				b.w(" OUTPUT INSERTED.", d.Quote(ret))
+				b.w(" OUTPUT INSERTED.", d.ident(ret))
 			}
 			b.w(" DEFAULT VALUES")
 		default:
@@ -516,11 +547,11 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 			if i > 0 {
 				b.w(", ")
 			}
-			b.w(d.Quote(c))
+			b.w(d.ident(c))
 		}
 		b.w(")")
 		if d.kind == KindMSSQL && ret != "" {
-			b.w(" OUTPUT INSERTED.", d.Quote(ret))
+			b.w(" OUTPUT INSERTED.", d.ident(ret))
 		}
 		b.w(" VALUES ")
 		for r, row := range ins.Rows {
@@ -556,7 +587,7 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 				if c == "" {
 					return Stmt{}, errors.New("dialect: OnConflict needs at least one column on MySQL")
 				}
-				qc := d.Quote(c)
+				qc := d.ident(c)
 				b.w(" ON DUPLICATE KEY UPDATE ", qc, " = ", qc)
 			} else {
 				b.w(" ON DUPLICATE KEY UPDATE ")
@@ -564,7 +595,7 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 					if i > 0 {
 						b.w(", ")
 					}
-					qc := d.Quote(c)
+					qc := d.ident(c)
 					b.w(qc, " = VALUES(", qc, ")")
 				}
 			}
@@ -576,7 +607,7 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 					if i > 0 {
 						b.w(", ")
 					}
-					b.w(d.Quote(c))
+					b.w(d.ident(c))
 				}
 				b.w(")")
 			}
@@ -588,7 +619,7 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 					if i > 0 {
 						b.w(", ")
 					}
-					qc := d.Quote(c)
+					qc := d.ident(c)
 					b.w(qc, " = EXCLUDED.", qc)
 				}
 			}
@@ -596,7 +627,7 @@ func (d *sqlDialect) Insert(ins Insert) (Stmt, error) {
 	}
 
 	if ret != "" && d.kind != KindMSSQL {
-		b.w(" RETURNING ", d.Quote(ret))
+		b.w(" RETURNING ", d.ident(ret))
 	}
 	return b.stmt(), nil
 }
@@ -611,10 +642,7 @@ func (d *sqlDialect) Update(table string, set []q.Mutation, where q.Filter) (Stm
 		if i > 0 {
 			b.w(", ")
 		}
-		if !isColumn(m.Field) {
-			return Stmt{}, fmt.Errorf("dialect: update %s: %q is not a column name", table, m.Field)
-		}
-		f := d.Quote(m.Field)
+		f := d.ident(m.Field)
 		b.w(f, " = ")
 		switch m.Kind {
 		case q.MutSet:
@@ -663,7 +691,7 @@ func (d *sqlDialect) mssqlMergeInsert(ins Insert) (Stmt, error) {
 	b := d.newBuf()
 	n := len(ins.Rows) * len(ins.Columns)
 	b.reserve(n, n*8+len(ins.Columns)*48)
-	pos := d.Quote(PositionColumn)
+	pos := d.ident(PositionColumn)
 	b.w("MERGE INTO ", d.Quote(ins.Table), " USING (VALUES ")
 	for r, row := range ins.Rows {
 		if len(row) != len(ins.Columns) {
@@ -681,16 +709,16 @@ func (d *sqlDialect) mssqlMergeInsert(ins Insert) (Stmt, error) {
 	}
 	b.w(") AS s (")
 	for _, c := range ins.Columns {
-		b.w(d.Quote(c), ", ")
+		b.w(d.ident(c), ", ")
 	}
 	b.w(pos, ") ON 1 = 0 WHEN NOT MATCHED THEN INSERT (", d.quoteList(ins.Columns), ") VALUES (")
 	for i, c := range ins.Columns {
 		if i > 0 {
 			b.w(", ")
 		}
-		b.w("s.", d.Quote(c))
+		b.w("s.", d.ident(c))
 	}
-	b.w(") OUTPUT s.", pos, ", INSERTED.", d.Quote(ins.Returning), ";")
+	b.w(") OUTPUT s.", pos, ", INSERTED.", d.ident(ins.Returning), ";")
 	return b.stmt(), nil
 }
 
@@ -722,37 +750,16 @@ func utcArg(v any) any {
 // isNumber reports whether s is a numeric literal such as 1 or 2.5 (kept
 // unquoted, e.g. in a select list); "3d_model" is an identifier.
 func isNumber(s string) bool {
+	if len(s) > 1 && s[0] == '-' {
+		s = s[1:]
+	}
+	if s == "" {
+		return false
+	}
 	for i := 0; i < len(s); i++ {
 		if (s[i] < '0' || s[i] > '9') && s[i] != '.' {
 			return false
 		}
 	}
 	return true
-}
-
-// isColumn reports whether s is a plain, optionally table-qualified column
-// name. Sort fields and SET targets often come from request parameters, so
-// they must never carry SQL: Quote passes expressions through unchanged.
-func isColumn(s string) bool {
-	if s == "" {
-		return false
-	}
-	start := true
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '.':
-			if start {
-				return false
-			}
-			start = true
-			continue
-		case c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80:
-		case c >= '0' && c <= '9': // quoted, so "3d_model" is fine
-		default:
-			return false
-		}
-		start = false
-	}
-	return !start
 }

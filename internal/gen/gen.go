@@ -221,6 +221,9 @@ func (p *Project) RenameColumn(model, from, to string) error {
 		[]string{fmt.Sprintf("s.RenameColumn(%q, %q, %q)", mf.table, to, col)})
 	if err == nil {
 		p.regenCols()
+		if strings.HasSuffix(mf.exprString(f.Type), "kilncrypt.String") {
+			p.Out("warning: %s.%s is encrypted with kilncrypt, and values are bound to their column: after this rename they no longer decrypt until re-encrypted (read with OpenColumn(keys, %q, %q), write with the new name)", mf.table, col, mf.table, col)
+		}
 	}
 	return err
 }

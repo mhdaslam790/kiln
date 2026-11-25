@@ -96,6 +96,46 @@ type AfterWritePlugin interface {
 	AfterWrite(ctx context.Context, w *WriteInfo) error
 }
 
+// ReadPlugin runs after kiln loaded records of a model: Find, FindAll,
+// FindByID, Each, Cursor, Paginate, preloads and cached results. It is not
+// called for raw SQL scanned into structs (DB.Query) or when nothing was
+// found. An error fails the read.
+type ReadPlugin interface {
+	Plugin
+	AfterRead(ctx context.Context, r *ReadInfo) error
+}
+
+// ReadInfo gives a ReadPlugin access to the loaded records.
+type ReadInfo struct {
+	Table string
+	Model *ModelInfo
+	m     *meta.Model
+	items reflect.Value // []T, addressable elements
+}
+
+// Len returns the number of records.
+func (r *ReadInfo) Len() int { return r.items.Len() }
+
+// Field returns a pointer to record i's field for column (e.g. *string),
+// or nil if the model has no such column.
+func (r *ReadInfo) Field(i int, column string) any {
+	f := r.m.Field(column)
+	if f == nil {
+		return nil
+	}
+	return r.items.Index(i).FieldByIndex(f.Index).Addr().Interface()
+}
+
+func (db *DB) afterRead(ctx context.Context, m *meta.Model, items reflect.Value) error {
+	r := &ReadInfo{Table: m.Table, Model: modelInfo(m), m: m, items: items}
+	for _, p := range db.readPlugins {
+		if err := p.AfterRead(ctx, r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // TxPlugin runs when a top-level transaction starts (Transaction or
 // Begin; not savepoints), before your function sees the transaction. Use it
 // for per-transaction session settings, e.g. SET LOCAL / set_config for
@@ -136,12 +176,16 @@ func Use(p Plugin) Option {
 			db.afterWritePlugins = append(db.afterWritePlugins, ap)
 			hooked = true
 		}
+		if rp, ok := p.(ReadPlugin); ok {
+			db.readPlugins = append(db.readPlugins, rp)
+			hooked = true
+		}
 		if tp, ok := p.(TxPlugin); ok {
 			db.txPlugins = append(db.txPlugins, tp)
 			hooked = true
 		}
 		if !hooked {
-			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterWrite, AfterQuery, AfterBegin, Allow/Done, Wrote/ReadPrimary", p.Name()))
+			panic(fmt.Sprintf("orm: plugin %q implements none of BeforeQuery, BeforeWrite, AfterWrite, AfterRead, AfterQuery, AfterBegin, Allow/Done, Wrote/ReadPrimary", p.Name()))
 		}
 	}
 }

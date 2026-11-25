@@ -3,7 +3,7 @@ MYSQL_DSN ?= root:secret@tcp(localhost:53306)/kiln?parseTime=true
 MSSQL_DSN ?= sqlserver://sa:Secret_Passw0rd@localhost:51433?database=master
 REDIS_ADDR ?= localhost:56379
 
-.PHONY: test test-all lint db-up db-down
+.PHONY: test test-all lint db-up db-down release
 
 # Unit tests + SQLite end-to-end tests (no external services).
 test:
@@ -48,3 +48,7 @@ db-up:
 
 db-down:
 	docker compose -f integration/docker-compose.yml down
+
+# Tag a merged PR: make release PR=28 TAGS="v1.9.1 kilncrypt/v0.2.1"
+release:
+	scripts/release.sh $(PR) $(TAGS)

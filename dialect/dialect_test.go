@@ -49,7 +49,7 @@ func TestSelect(t *testing.T) {
 	check(t, "select", got, want{
 		KindPostgres: `SELECT "id", "name" FROM "users" WHERE ("active" = $1 AND ("age" > $2 OR "age" IS NULL)) ORDER BY "created_at" DESC, "id" ASC LIMIT 10 OFFSET 20`,
 		KindMySQL:    "SELECT `id`, `name` FROM `users` WHERE (`active` = ? AND (`age` > ? OR `age` IS NULL)) ORDER BY `created_at` DESC, `id` ASC LIMIT 10 OFFSET 20",
-		KindSQLite:   `SELECT "id", "name" FROM "users" WHERE ("active" = ? AND ("age" > ? OR "age" IS NULL)) ORDER BY "created_at" DESC, "id" ASC LIMIT 10 OFFSET 20`,
+		KindSQLite:   "SELECT `id`, `name` FROM `users` WHERE (`active` = ? AND (`age` > ? OR `age` IS NULL)) ORDER BY `created_at` DESC, `id` ASC LIMIT 10 OFFSET 20",
 		KindMSSQL:    `SELECT [id], [name] FROM [users] WHERE ([active] = @p1 AND ([age] > @p2 OR [age] IS NULL)) ORDER BY [created_at] DESC, [id] ASC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY`,
 	})
 	if !reflect.DeepEqual(args[KindPostgres], []any{true, 18}) {
@@ -62,7 +62,7 @@ func TestSelectLimitOnlyAndLock(t *testing.T) {
 	check(t, "lock", got, want{
 		KindPostgres: `SELECT * FROM "jobs" WHERE "state" = $1 LIMIT 1 FOR UPDATE`,
 		KindMySQL:    "SELECT * FROM `jobs` WHERE `state` = ? LIMIT 1 FOR UPDATE",
-		KindSQLite:   `SELECT * FROM "jobs" WHERE "state" = ? LIMIT 1`,
+		KindSQLite:   "SELECT * FROM `jobs` WHERE `state` = ? LIMIT 1",
 		KindMSSQL:    `SELECT TOP (1) * FROM [jobs] WITH (UPDLOCK, ROWLOCK) WHERE [state] = @p1`,
 	})
 }
@@ -92,7 +92,7 @@ func TestFiltersAndJoins(t *testing.T) {
 
 func TestEmptyIn(t *testing.T) {
 	got, _ := selectAll(t, q.From("t").Where(q.In("id")))
-	check(t, "empty in", got, want{KindSQLite: `SELECT * FROM "t" WHERE 1=0`})
+	check(t, "empty in", got, want{KindSQLite: "SELECT * FROM `t` WHERE 1=0"})
 }
 
 func TestOffsetWithoutLimit(t *testing.T) {
@@ -100,7 +100,7 @@ func TestOffsetWithoutLimit(t *testing.T) {
 	check(t, "offset", got, want{
 		KindPostgres: `SELECT * FROM "t" OFFSET 5`,
 		KindMySQL:    "SELECT * FROM `t` LIMIT 18446744073709551615 OFFSET 5",
-		KindSQLite:   `SELECT * FROM "t" LIMIT -1 OFFSET 5`,
+		KindSQLite:   "SELECT * FROM `t` LIMIT -1 OFFSET 5",
 		KindMSSQL:    `SELECT * FROM [t] ORDER BY (SELECT NULL) OFFSET 5 ROWS`,
 	})
 }
@@ -148,7 +148,7 @@ func TestInsert(t *testing.T) {
 	check(t, "insert", got, want{
 		KindPostgres: `INSERT INTO "users" ("name", "age") VALUES ($1, $2), ($3, $4) RETURNING "id"`,
 		KindMySQL:    "INSERT INTO `users` (`name`, `age`) VALUES (?, ?), (?, ?)",
-		KindSQLite:   `INSERT INTO "users" ("name", "age") VALUES (?, ?), (?, ?) RETURNING "id"`,
+		KindSQLite:   "INSERT INTO `users` (`name`, `age`) VALUES (?, ?), (?, ?) RETURNING `id`",
 		KindMSSQL:    `MERGE INTO [users] USING (VALUES (@p1, @p2, 0), (@p3, @p4, 1)) AS s ([name], [age], [kiln_pos]) ON 1 = 0 WHEN NOT MATCHED THEN INSERT ([name], [age]) VALUES (s.[name], s.[age]) OUTPUT s.[kiln_pos], INSERTED.[id];`,
 	})
 }
@@ -240,9 +240,8 @@ func TestCreateTable(t *testing.T) {
 	check(t, "create table", got, want{
 		KindPostgres: `CREATE TABLE "posts" ("id" BIGSERIAL NOT NULL PRIMARY KEY, "title" VARCHAR(120) NOT NULL, "published" BOOLEAN DEFAULT FALSE, "price" DECIMAL(10,2), "meta" JSONB, "user_id" BIGINT, "created_at" TIMESTAMPTZ NOT NULL, "updated_at" TIMESTAMPTZ NOT NULL, CONSTRAINT "uniq_posts_user_id_title" UNIQUE ("user_id", "title"), CONSTRAINT "fk_posts_user_id" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE);
 CREATE INDEX "idx_posts_user_id" ON "posts" ("user_id")`,
-		KindMySQL: "CREATE TABLE `posts` (`id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `title` VARCHAR(120) NOT NULL, `published` BOOL DEFAULT FALSE, `price` DECIMAL(10,2), `meta` JSON, `user_id` BIGINT, `created_at` DATETIME NOT NULL, `updated_at` DATETIME NOT NULL, CONSTRAINT `uniq_posts_user_id_title` UNIQUE (`user_id`, `title`), CONSTRAINT `fk_posts_user_id` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE);\nCREATE INDEX `idx_posts_user_id` ON `posts` (`user_id`)",
-		KindSQLite: `CREATE TABLE "posts" ("id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, "title" VARCHAR(120) NOT NULL, "published" BOOLEAN DEFAULT 0, "price" DECIMAL(10,2), "meta" TEXT, "user_id" BIGINT, "created_at" DATETIME NOT NULL, "updated_at" DATETIME NOT NULL, CONSTRAINT "uniq_posts_user_id_title" UNIQUE ("user_id", "title"), CONSTRAINT "fk_posts_user_id" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE);
-CREATE INDEX "idx_posts_user_id" ON "posts" ("user_id")`,
+		KindMySQL:  "CREATE TABLE `posts` (`id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `title` VARCHAR(120) NOT NULL, `published` BOOL DEFAULT FALSE, `price` DECIMAL(10,2), `meta` JSON, `user_id` BIGINT, `created_at` DATETIME NOT NULL, `updated_at` DATETIME NOT NULL, CONSTRAINT `uniq_posts_user_id_title` UNIQUE (`user_id`, `title`), CONSTRAINT `fk_posts_user_id` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE);\nCREATE INDEX `idx_posts_user_id` ON `posts` (`user_id`)",
+		KindSQLite: "CREATE TABLE `posts` (`id` INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, `title` VARCHAR(120) NOT NULL, `published` BOOLEAN DEFAULT 0, `price` DECIMAL(10,2), `meta` TEXT, `user_id` BIGINT, `created_at` DATETIME NOT NULL, `updated_at` DATETIME NOT NULL, CONSTRAINT `uniq_posts_user_id_title` UNIQUE (`user_id`, `title`), CONSTRAINT `fk_posts_user_id` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE);\nCREATE INDEX `idx_posts_user_id` ON `posts` (`user_id`)",
 		KindMSSQL: `CREATE TABLE [posts] ([id] BIGINT NOT NULL IDENTITY(1,1) PRIMARY KEY, [title] NVARCHAR(120) NOT NULL, [published] BIT DEFAULT 0, [price] DECIMAL(10,2), [meta] NVARCHAR(MAX), [user_id] BIGINT, [created_at] DATETIME2 NOT NULL, [updated_at] DATETIME2 NOT NULL, CONSTRAINT [uniq_posts_user_id_title] UNIQUE ([user_id], [title]), CONSTRAINT [fk_posts_user_id] FOREIGN KEY ([user_id]) REFERENCES [users] ([id]) ON DELETE CASCADE);
 CREATE INDEX [idx_posts_user_id] ON [posts] ([user_id])`,
 	})
@@ -281,14 +280,8 @@ ALTER TABLE "users" RENAME TO "people";
 CREATE UNIQUE INDEX IF NOT EXISTS "uniq_people_email" ON "people" ("email");
 DROP INDEX "uniq_people_email";
 ALTER TABLE "people" ALTER COLUMN "age" TYPE BIGINT, ALTER COLUMN "age" SET NOT NULL, ALTER COLUMN "age" DROP DEFAULT`,
-		KindMySQL: "ALTER TABLE `users` ADD COLUMN `nickname` VARCHAR(255) DEFAULT 'anon';\nALTER TABLE `users` RENAME COLUMN `name` TO `full_name`;\nALTER TABLE `users` DROP COLUMN `legacy`;\nRENAME TABLE `users` TO `people`;\nCREATE UNIQUE INDEX `uniq_people_email` ON `people` (`email`);\nDROP INDEX `uniq_people_email` ON `people`;\nALTER TABLE `people` MODIFY COLUMN `age` BIGINT NOT NULL",
-		KindSQLite: `ALTER TABLE "users" ADD COLUMN "nickname" VARCHAR(255) DEFAULT 'anon';
-ALTER TABLE "users" RENAME COLUMN "name" TO "full_name";
-ALTER TABLE "users" DROP COLUMN "legacy";
-ALTER TABLE "users" RENAME TO "people";
-CREATE UNIQUE INDEX IF NOT EXISTS "uniq_people_email" ON "people" ("email");
-DROP INDEX "uniq_people_email";
-ERR: dialect: SQLite cannot change a column; recreate the table`,
+		KindMySQL:  "ALTER TABLE `users` ADD COLUMN `nickname` VARCHAR(255) DEFAULT 'anon';\nALTER TABLE `users` RENAME COLUMN `name` TO `full_name`;\nALTER TABLE `users` DROP COLUMN `legacy`;\nRENAME TABLE `users` TO `people`;\nCREATE UNIQUE INDEX `uniq_people_email` ON `people` (`email`);\nDROP INDEX `uniq_people_email` ON `people`;\nALTER TABLE `people` MODIFY COLUMN `age` BIGINT NOT NULL",
+		KindSQLite: "ALTER TABLE `users` ADD COLUMN `nickname` VARCHAR(255) DEFAULT 'anon';\nALTER TABLE `users` RENAME COLUMN `name` TO `full_name`;\nALTER TABLE `users` DROP COLUMN `legacy`;\nALTER TABLE `users` RENAME TO `people`;\nCREATE UNIQUE INDEX IF NOT EXISTS `uniq_people_email` ON `people` (`email`);\nDROP INDEX `uniq_people_email`;\nERR: dialect: SQLite cannot change a column; recreate the table",
 		KindMSSQL: `ALTER TABLE [users] ADD [nickname] NVARCHAR(255) DEFAULT 'anon';
 EXEC sp_rename 'users.name', 'full_name', 'COLUMN';
 DECLARE @df sysname, @sql nvarchar(max); SELECT @df = dc.name FROM sys.default_constraints dc JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id WHERE dc.parent_object_id = OBJECT_ID('[users]') AND c.name = 'legacy'; IF @df IS NOT NULL BEGIN SET @sql = N'ALTER TABLE [users] DROP CONSTRAINT ' + QUOTENAME(@df); EXEC sp_executesql @sql; END;
@@ -356,28 +349,37 @@ func TestTimesSentInUTC(t *testing.T) {
 	}
 }
 
-func TestSortAndSetNeedColumnNames(t *testing.T) {
-	for _, ok := range []string{"name", "users.name", "_x1", "ünï", "3d_model", "t.3d"} {
-		if !isColumn(ok) {
-			t.Errorf("isColumn(%q) = false", ok)
-		}
-	}
-	bad := []string{"", "(SELECT 1)", "name; DROP TABLE x", "name = (SELECT 1), age", "a..b", "a.", ".a", "a b", `a"b`, "a`b", "a[b]", "LOWER(name)", "*"}
-	for _, s := range bad {
-		if isColumn(s) {
-			t.Errorf("isColumn(%q) = true", s)
-		}
-	}
+func TestSortAndSetAreAlwaysNames(t *testing.T) {
+	evil := "name = (SELECT password FROM admins), age"
 	for _, d := range []Dialect{SQLite(), Postgres(), MySQL(), MSSQL()} {
-		if _, err := d.Select(q.Apply(q.From("users"), q.Sort("-(SELECT password FROM admins)"))); err == nil {
-			t.Errorf("%s: expression sort accepted", d.Kind())
+		st, err := d.Select(q.Apply(q.From("users"), q.Sort("-(SELECT password FROM admins)", "my col", "users.created_at")))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if _, err := d.Update("users", []q.Mutation{q.Set("name = (SELECT 1), age", 1)}, nil); err == nil {
-			t.Errorf("%s: expression SET target accepted", d.Kind())
+		want := map[Kind]string{
+			KindPostgres: `ORDER BY "(SELECT password FROM admins)" DESC, "my col" ASC, "users"."created_at" ASC`,
+			KindSQLite:   "ORDER BY `(SELECT password FROM admins)` DESC, `my col` ASC, `users`.`created_at` ASC",
+			KindMySQL:    "ORDER BY `(SELECT password FROM admins)` DESC, `my col` ASC, `users`.`created_at` ASC",
+			KindMSSQL:    "ORDER BY [(SELECT password FROM admins)] DESC, [my col] ASC, [users].[created_at] ASC",
+		}[d.Kind()]
+		if !strings.Contains(st.SQL, want) {
+			t.Errorf("%s sort: %s", d.Kind(), st.SQL)
 		}
-		if _, err := d.Select(q.Apply(q.From("users"), q.Sort("-users.created_at", "id"))); err != nil {
-			t.Errorf("%s: %v", d.Kind(), err)
+		up, err := d.Update("users", []q.Mutation{q.Set(evil, 1), q.Set("my-col", 2)}, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
+		sd := d.(*sqlDialect)
+		if prefix := "UPDATE " + sd.quoteOne("users") + " SET " + sd.quoteOne(evil) + " = "; !strings.HasPrefix(up.SQL, prefix) || !strings.Contains(up.SQL, ", "+sd.quoteOne("my-col")+" = ") {
+			t.Errorf("%s set: %s", d.Kind(), up.SQL)
+		}
+	}
+	// Quote escapes the quote character inside a name.
+	if got := Postgres().(*sqlDialect).ident(`a"; DROP TABLE x; --`); got != `"a""; DROP TABLE x; --"` {
+		t.Errorf("ident escape: %s", got)
+	}
+	if got := MySQL().(*sqlDialect).ident("a` b"); got != "`a`` b`" {
+		t.Errorf("mysql ident escape: %s", got)
 	}
 }
 
@@ -385,6 +387,12 @@ func TestQuoteDigitLedIdentifier(t *testing.T) {
 	for _, d := range []Dialect{SQLite(), Postgres(), MySQL(), MSSQL()} {
 		if got := d.Quote("3d_model"); got == "3d_model" {
 			t.Errorf("%s: 3d_model left unquoted", d.Kind())
+		}
+		if got := d.Quote("my-col"); got == "my-col" {
+			t.Errorf("%s: my-col left unquoted", d.Kind())
+		}
+		if got := d.Quote("-1"); got != "-1" {
+			t.Errorf("%s: negative number quoted: %s", d.Kind(), got)
 		}
 		if got := d.Quote("1"); got != "1" {
 			t.Errorf("%s: number quoted: %s", d.Kind(), got)

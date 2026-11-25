@@ -3,6 +3,9 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -74,7 +77,7 @@ func TestKilncrypt(t *testing.T) {
 			Diagnosis *string `db:"diagnosis"`
 		}
 		must(t, db.Query(ctx, &raw, "SELECT email, email_index, diagnosis FROM patients ORDER BY id"))
-		if raw[0].Email == nil || !strings.HasPrefix(*raw[0].Email, "kc1:") || strings.Contains(*raw[0].Email, "Ann") ||
+		if raw[0].Email == nil || !strings.HasPrefix(*raw[0].Email, "kc2:") || strings.Contains(*raw[0].Email, "Ann") ||
 			raw[0].Diagnosis == nil || strings.Contains(*raw[0].Diagnosis, "flu") || raw[0].Index == nil || len(*raw[0].Index) != 32 {
 			t.Fatalf("stored row: %+v", raw[0])
 		}
@@ -117,18 +120,74 @@ func TestKilncrypt(t *testing.T) {
 			t.Fatalf("old value still found: %v", err)
 		}
 
-		// UpdateAny needs a sealed value: plaintext is refused, Seal works.
-		if _, err := patients.UpdateAny(ctx, q.Eq("name", "cy"), q.Set("diagnosis", kilncrypt.NewString("cold"))); !errors.Is(err, kilncrypt.ErrNotSealed) {
-			t.Fatalf("UpdateAny with plaintext: %v", err)
+		// UpdateAny seals q.Set values for their column; the caller's
+		// mutations are not changed.
+		set := []q.Mutation{q.Set("diagnosis", kilncrypt.NewString("cold"))}
+		_, err = patients.UpdateAny(ctx, q.Eq("name", "cy"), set...)
+		must(t, err)
+		if v, err := set[0].Value.(kilncrypt.String).Value(); v != nil || !errors.Is(err, kilncrypt.ErrNotSealed) {
+			t.Fatalf("caller's mutation changed: %v %v", v, err)
 		}
-		sealed, err := keys.Seal("cold")
-		must(t, err)
-		_, err = patients.UpdateAny(ctx, q.Eq("name", "cy"), q.Set("diagnosis", sealed))
-		must(t, err)
 		cy, err := patients.Find(ctx, q.Eq("name", "cy"))
 		must(t, err)
-		if d, _ := cy.Diagnosis.Open(keys); d != "cold" || !cy.Email.IsNull() {
-			t.Fatalf("cy: %q, email null %v", d, cy.Email.IsNull())
+		if d, err := cy.Diagnosis.Open(keys); d != "cold" || err != nil || !cy.Email.IsNull() {
+			t.Fatalf("cy: %q %v, email null %v", d, err, cy.Email.IsNull())
+		}
+		if _, err := patients.UpdateAny(ctx, q.Eq("name", "cy"), q.Set("name", kilncrypt.NewString("x"))); err == nil {
+			t.Fatal("encrypted value set on a plain column")
+		}
+
+		// Values are bound to their column: copied into another column
+		// with raw SQL, it no longer decrypts.
+		_, err = db.Exec(ctx, "UPDATE patients SET diagnosis = email WHERE id = ?", ann.ID)
+		must(t, err)
+		swapped, err := patients.FindByID(ctx, ann.ID)
+		must(t, err)
+		if _, err := swapped.Diagnosis.Open(keys); !errors.Is(err, kilncrypt.ErrDecrypt) {
+			t.Fatalf("value copied to another column opened: %v", err)
+		}
+		// Writing the record back stores the bytes unchanged: still refused.
+		must(t, patients.Update(ctx, &swapped))
+		again, err := patients.FindByID(ctx, ann.ID)
+		must(t, err)
+		if _, err := again.Diagnosis.Open(keys); !errors.Is(err, kilncrypt.ErrDecrypt) {
+			t.Fatalf("copied value opened after a rewrite: %v", err)
+		}
+		// Re-sealing it (key rotation) checks it first, so it can't be laundered.
+		rot, err := kilncrypt.NewKeys(indexKey, cryptKey(9, 'z'), cryptKey(1, 'a'))
+		must(t, err)
+		if _, err := kilncrypt.Rotate[Patient](ctx, orm.Open(db.SQL(), db.Dialect(), kilncrypt.Plugin(rot)), rot); !errors.Is(err, kilncrypt.ErrDecrypt) {
+			t.Fatalf("Rotate re-sealed a copied value: %v", err)
+		}
+		_, err = db.Exec(ctx, "UPDATE patients SET diagnosis = NULL WHERE id = ?", ann.ID)
+		must(t, err)
+		// Scanned with raw SQL: Open can't know the column, OpenColumn can.
+		var rawEmail []kilncrypt.String
+		must(t, db.Query(ctx, &rawEmail, "SELECT email FROM patients WHERE id = ?", ann.ID))
+		if _, err := rawEmail[0].Open(keys); !errors.Is(err, kilncrypt.ErrUnbound) {
+			t.Fatalf("raw Open: %v", err)
+		}
+		if v, err := rawEmail[0].OpenColumn(keys, "patients", "email"); err != nil || v != "ann@new.io" {
+			t.Fatalf("OpenColumn = %q, %v", v, err)
+		}
+		// SealColumn for raw SQL writes.
+		sc, err := keys.SealColumn("raw flu", "patients", "diagnosis")
+		must(t, err)
+		_, err = db.Exec(ctx, "UPDATE patients SET diagnosis = ? WHERE name = ?", sc, "bob")
+		must(t, err)
+		bob, err := patients.Find(ctx, q.Eq("name", "bob"))
+		must(t, err)
+		if d, err := bob.Diagnosis.Open(keys); err != nil || d != "raw flu" {
+			t.Fatalf("SealColumn value: %q %v", d, err)
+		}
+
+		// v0.1 values (kc1, not bound to a column) are still read.
+		_, err = db.Exec(ctx, "UPDATE patients SET diagnosis = ? WHERE name = ?", sealV1(t, 1, 'a', "old flu"), "bob")
+		must(t, err)
+		bob, err = patients.Find(ctx, q.Eq("name", "bob"))
+		must(t, err)
+		if d, err := bob.Diagnosis.Open(keys); err != nil || d != "old flu" {
+			t.Fatalf("v0.1 value: %q %v", d, err)
 		}
 
 		// Rotation: new current key, old key kept for reading.
@@ -142,11 +201,23 @@ func TestKilncrypt(t *testing.T) {
 		if n != 3 {
 			t.Fatalf("rotated %d records, want 3", n)
 		}
+		// Rotate rewrote the v0.1 value as kc2: RejectUnbound can be set.
+		var bobDiag string
+		must(t, db.Query(ctx, &bobDiag, "SELECT diagnosis FROM patients WHERE name = ?", "bob"))
+		if !strings.HasPrefix(bobDiag, "kc2:") {
+			t.Fatalf("v0.1 value not upgraded: %.8s", bobDiag)
+		}
 		if n, err := kilncrypt.Rotate[Patient](ctx, rdb, newKeys); err != nil || n != 0 {
 			t.Fatalf("second Rotate: %d %v", n, err)
 		}
 		onlyNew, err := kilncrypt.NewKeys(indexKey, cryptKey(2, 'b'))
 		must(t, err)
+		onlyNew.RejectUnbound()
+		bob, err = orm.For[Patient](rdb).Find(ctx, q.Eq("name", "bob"))
+		must(t, err)
+		if d, err := bob.Diagnosis.Open(onlyNew); err != nil || d != "old flu" {
+			t.Fatalf("upgraded v0.1 value with RejectUnbound: %q %v", d, err)
+		}
 		all, err := orm.For[Patient](rdb).FindAll(ctx, email2.Eq("ann@new.io"))
 		must(t, err)
 		if len(all) != 1 {
@@ -182,7 +253,7 @@ func TestKilncrypt(t *testing.T) {
 		must(t, db.Query(ctx, &stored, "SELECT diagnosis FROM patients WHERE diagnosis IS NOT NULL"))
 		stale := 0
 		for _, v := range stored {
-			raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(v, "kc1:"))
+			raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(v, "kc2:"))
 			if err != nil || binary.BigEndian.Uint32(raw) != 2 {
 				stale++
 			}
@@ -213,7 +284,7 @@ func TestKilncrypt(t *testing.T) {
 					t.Fatalf("plaintext in audit log: %s", l)
 				}
 			}
-			if !strings.Contains(logs[1], `"diagnosis":["kc1:`) || strings.Contains(logs[2], "diagnosis") {
+			if !strings.Contains(logs[1], `"diagnosis":["kc2:`) || strings.Contains(logs[2], "diagnosis") {
 				t.Fatalf("diffs: %s / %s", logs[1], logs[2])
 			}
 		})
@@ -224,4 +295,19 @@ func TestKilncrypt(t *testing.T) {
 			t.Fatalf("insert without plugin: %v", err)
 		}
 	})
+}
+
+// sealV1 writes a value exactly as kilncrypt v0.1 stored it.
+func sealV1(t *testing.T, id uint32, secret byte, plain string) string {
+	t.Helper()
+	block, err := aes.NewCipher(bytes.Repeat([]byte{secret}, kilncrypt.KeySize))
+	must(t, err)
+	aead, err := cipher.NewGCM(block)
+	must(t, err)
+	buf := make([]byte, 4+aead.NonceSize())
+	binary.BigEndian.PutUint32(buf, id)
+	_, err = rand.Read(buf[4:])
+	must(t, err)
+	out := aead.Seal(buf, buf[4:], []byte(plain), append([]byte("kc1:"), buf[:4]...))
+	return "kc1:" + base64.RawURLEncoding.EncodeToString(out)
 }

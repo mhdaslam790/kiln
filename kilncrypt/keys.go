@@ -16,8 +16,12 @@
 //	got, err := users.Find(ctx, email.Eq("Ann@x.io"))     // search without decrypting
 //	plain, err := got.Email.Open(keys)                        // decrypt where you need it
 //
-// Values are sealed with AES-256-GCM. Loaded values stay encrypted until
-// you call Open, and print, log and marshal to JSON as "[encrypted]".
+// Values are sealed with AES-256-GCM and bound to their table and column:
+// a value copied into another column or table (by someone with write
+// access to the database) does not decrypt. Loaded values stay encrypted
+// until you call Open, and print, log and marshal to JSON as "[encrypted]".
+// A value is not bound to its row: swapping values between two rows of the
+// same column is not detected.
 //
 // Searching works through a blind index: an HMAC of the (normalized) value
 // in a second column, compared with Index.Eq. It supports exact matches
@@ -48,7 +52,10 @@ var (
 	ErrDecrypt = errors.New("kilncrypt: cannot decrypt value")
 	// ErrNotSealed is returned when a String created by NewString is
 	// written without kilncrypt.Plugin, which would store it unencrypted.
-	ErrNotSealed = errors.New("kilncrypt: value is not encrypted; add kilncrypt.Plugin(keys) to orm.Open or use Keys.Seal")
+	ErrNotSealed = errors.New("kilncrypt: value is not encrypted; add kilncrypt.Plugin(keys) to orm.Open, or use Keys.SealColumn for raw SQL")
+	// ErrUnbound is returned by Open for a value that was not loaded
+	// through kiln (e.g. scanned by raw SQL), so its column is unknown.
+	ErrUnbound = errors.New("kilncrypt: value was not loaded through kiln; use OpenColumn with its table and column")
 )
 
 // Key is one encryption key. ID is stored with every value it seals, so
@@ -71,10 +78,17 @@ func DecodeKey(id uint32, base64Secret string) (Key, error) {
 // Keys holds the encryption keys and the blind index key. It is safe for
 // concurrent use.
 type Keys struct {
-	current uint32
-	aeads   map[uint32]cipher.AEAD // read-only after NewKeys
-	index   []byte
+	current   uint32
+	aeads     map[uint32]cipher.AEAD // read-only after NewKeys
+	index     []byte
+	rejectKC1 bool
 }
+
+// RejectUnbound makes Open refuse values written by kilncrypt v0.1, which
+// are not bound to a column (someone with write access to the database
+// could copy one into another column). Call it after Rotate has rewritten
+// every model's values, before the Keys are used.
+func (k *Keys) RejectUnbound() { k.rejectKC1 = true }
 
 // NewKeys returns Keys that seal with current and open values sealed with
 // current or any of old (keys being rotated out, see Rotate). indexKey is
@@ -109,35 +123,64 @@ func NewKeys(indexKey []byte, current Key, old ...Key) (*Keys, error) {
 	return k, nil
 }
 
-// Seal encrypts v with the current key. Plugin does this for you on
-// insert and update; use Seal for values in UpdateAny (q.Set) or raw SQL.
-func (k *Keys) Seal(v string) (String, error) {
-	sealed, err := k.seal(v)
+// Seal returns a String holding v.
+//
+// Deprecated: values are now bound to their column, which Seal doesn't
+// know. Use NewString (Plugin seals it on Insert, Update and UpdateAny's
+// q.Set), or SealColumn for raw SQL.
+func (k *Keys) Seal(v string) (String, error) { return NewString(v), nil }
+
+// SealColumn encrypts v for the given table and column, for writing with
+// raw SQL. Plugin does this for you on Insert, Update and UpdateAny.
+func (k *Keys) SealColumn(v, table, column string) (String, error) {
+	l := label(table, column)
+	sealed, err := k.seal(v, l)
 	if err != nil {
 		return String{}, err
 	}
-	return String{plain: v, hasPlain: true, sealed: sealed}, nil
+	return String{plain: v, hasPlain: true, sealed: sealed, bound: l}, nil
 }
 
-// Stored form: "kc1:" + base64url(key id (4 bytes) | nonce | ciphertext+tag).
-// The prefix and key id are authenticated, so they cannot be swapped.
-const prefix = "kc1:"
+// Stored form: prefix + base64url(key id (4 bytes) | nonce | ciphertext+tag).
+// "kc2:" values authenticate the prefix, key id and the value's table and
+// column; "kc1:" values (v0.1) only the prefix and key id. New values are
+// always kc2; kc1 values are read, and rewritten as kc2 on their next
+// write or by Rotate.
+const (
+	prefixV1 = "kc1:"
+	prefixV2 = "kc2:"
+)
 
-func (k *Keys) seal(v string) (string, error) {
+// label identifies a column: table NUL column (unambiguous, as names
+// can't contain NUL).
+func label(table, column string) string { return table + "\x00" + column }
+
+func (k *Keys) seal(v, label string) (string, error) {
 	aead := k.aeads[k.current]
 	buf := make([]byte, 4+aead.NonceSize(), 4+aead.NonceSize()+len(v)+aead.Overhead())
 	binary.BigEndian.PutUint32(buf, k.current)
 	if _, err := rand.Read(buf[4:]); err != nil {
 		return "", err
 	}
-	out := aead.Seal(buf, buf[4:], []byte(v), aad(buf[:4]))
-	return prefix + base64.RawURLEncoding.EncodeToString(out), nil
+	out := aead.Seal(buf, buf[4:], []byte(v), aad(prefixV2, buf[:4], label))
+	return prefixV2 + base64.RawURLEncoding.EncodeToString(out), nil
 }
 
-func (k *Keys) open(sealed string) (string, error) {
-	id, raw, ok := parse(sealed)
+// open decrypts a stored value that belongs to the column label ("" if
+// unknown, which only kc1 values accept).
+func (k *Keys) open(sealed, label string) (string, error) {
+	ver, id, raw, ok := parse(sealed)
 	if !ok {
 		return "", ErrDecrypt
+	}
+	pfx := prefixV2
+	switch {
+	case ver == 1 && k.rejectKC1:
+		return "", fmt.Errorf("%w: v0.1 value not bound to a column (RejectUnbound is set; run Rotate)", ErrDecrypt)
+	case ver == 1:
+		pfx, label = prefixV1, ""
+	case label == "":
+		return "", ErrUnbound
 	}
 	aead, ok := k.aeads[id]
 	if !ok {
@@ -147,25 +190,34 @@ func (k *Keys) open(sealed string) (string, error) {
 	if len(raw) < 4+n+aead.Overhead() {
 		return "", ErrDecrypt
 	}
-	plain, err := aead.Open(nil, raw[4:4+n], raw[4+n:], aad(raw[:4]))
+	plain, err := aead.Open(nil, raw[4:4+n], raw[4+n:], aad(pfx, raw[:4], label))
 	if err != nil {
 		return "", ErrDecrypt
 	}
 	return string(plain), nil
 }
 
-func aad(id []byte) []byte { return append([]byte(prefix), id...) }
+func aad(prefix string, id []byte, label string) []byte {
+	b := make([]byte, 0, len(prefix)+len(id)+len(label))
+	return append(append(append(b, prefix...), id...), label...)
+}
 
-// parse returns the key id and the decoded bytes of a stored value.
-func parse(sealed string) (uint32, []byte, bool) {
-	if len(sealed) < len(prefix) || sealed[:len(prefix)] != prefix {
-		return 0, nil, false
+// parse returns the format version (1 or 2), key id and decoded bytes of
+// a stored value.
+func parse(sealed string) (ver int, id uint32, raw []byte, ok bool) {
+	switch {
+	case len(sealed) >= 4 && sealed[:4] == prefixV2:
+		ver = 2
+	case len(sealed) >= 4 && sealed[:4] == prefixV1:
+		ver = 1
+	default:
+		return 0, 0, nil, false
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(sealed[len(prefix):])
+	raw, err := base64.RawURLEncoding.DecodeString(sealed[4:])
 	if err != nil || len(raw) < 4 {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
-	return binary.BigEndian.Uint32(raw), raw, true
+	return ver, binary.BigEndian.Uint32(raw), raw, true
 }
 
 // mac returns HMAC-SHA256(key, msg).

@@ -179,6 +179,7 @@ type DB struct {
 	routes       []RoutePlugin
 	queryPlugins []QueryPlugin
 	writePlugins []WritePlugin
+	readPlugins  []ReadPlugin
 	txPlugins    []TxPlugin
 	// afterWritePlugins: AfterWritePlugin; makes single-record writes transactional
 	afterWritePlugins []AfterWritePlugin

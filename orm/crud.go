@@ -233,7 +233,11 @@ func (db *DB) selectModels(ctx context.Context, m *meta.Model, qq q.Query) (refl
 	if err != nil {
 		return reflect.Value{}, err
 	}
-	return scanAll(ctx, rows, m)
+	items, err := scanAll(ctx, rows, m)
+	if len(db.readPlugins) != 0 && err == nil && items.Len() > 0 {
+		err = db.afterRead(ctx, m, items)
+	}
+	return items, err
 }
 
 // Find loads the first matching row into dst (*Struct). Soft-deleted rows
