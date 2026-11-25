@@ -273,6 +273,11 @@ func TestMigrations(t *testing.T) {
 			if len(st) != 3 || !st[0].Applied || !st[1].Applied || !st[2].Applied {
 				t.Fatalf("status %+v", st)
 			}
+			for _, x := range st { // the right instant, in local time on every database
+				if d := time.Since(x.AppliedAt); d < -time.Minute || d > time.Minute || x.AppliedAt.Location() != time.Local {
+					t.Fatalf("AppliedAt %v (%v ago, %v)", x.AppliedAt, d, x.AppliedAt.Location())
+				}
+			}
 
 			rolled, err := m.Down(ctx, 2)
 			must(t, err)
