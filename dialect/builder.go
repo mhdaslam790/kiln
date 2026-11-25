@@ -1,12 +1,14 @@
 package dialect
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/mhdaslam790/kiln/q"
 )
@@ -121,6 +123,9 @@ func (b *buf) w(s ...string) {
 }
 
 func (b *buf) arg(v any) {
+	if b.d.kind == KindSQLite {
+		v = sqliteArg(v)
+	}
 	b.args = append(b.args, v)
 	n := len(b.args)
 	switch b.d.kind {
@@ -425,6 +430,9 @@ func (b *buf) selectQuery(qq q.Query) error {
 			if i > 0 {
 				b.w(", ")
 			}
+			if !isColumn(s.Field) {
+				return fmt.Errorf("dialect: sort by %q: not a column name (use q.SQL for an ordering expression)", s.Field)
+			}
 			b.w(d.Quote(s.Field))
 			if s.Desc {
 				b.w(" DESC")
@@ -603,6 +611,9 @@ func (d *sqlDialect) Update(table string, set []q.Mutation, where q.Filter) (Stm
 		if i > 0 {
 			b.w(", ")
 		}
+		if !isColumn(m.Field) {
+			return Stmt{}, fmt.Errorf("dialect: update %s: %q is not a column name", table, m.Field)
+		}
 		f := d.Quote(m.Field)
 		b.w(f, " = ")
 		switch m.Kind {
@@ -681,4 +692,57 @@ func (d *sqlDialect) mssqlMergeInsert(ins Insert) (Stmt, error) {
 	}
 	b.w(") OUTPUT s.", pos, ", INSERTED.", d.Quote(ins.Returning), ";")
 	return b.stmt(), nil
+}
+
+// sqliteArg stores times in UTC. SQLite keeps times as text: the driver
+// cannot read back a time with a fixed-offset zone (what time.Parse returns
+// for "2026-03-04T05:06:07+05:00", e.g. from JSON), and text with mixed
+// offsets sorts and compares wrongly. The instant is unchanged.
+func sqliteArg(v any) any {
+	switch t := v.(type) {
+	case time.Time:
+		if t.Location() != time.UTC {
+			return t.UTC()
+		}
+	case *time.Time:
+		if t != nil && t.Location() != time.UTC {
+			u := t.UTC()
+			return &u
+		}
+	case sql.NullTime:
+		if t.Valid && t.Time.Location() != time.UTC {
+			return sql.NullTime{Time: t.Time.UTC(), Valid: true}
+		}
+	}
+	return v
+}
+
+// isColumn reports whether s is a plain, optionally table-qualified column
+// name. Sort fields and SET targets often come from request parameters, so
+// they must never carry SQL: Quote passes expressions through unchanged.
+func isColumn(s string) bool {
+	if s == "" {
+		return false
+	}
+	start := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '.':
+			if start {
+				return false
+			}
+			start = true
+			continue
+		case c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80:
+		case c >= '0' && c <= '9':
+			if start {
+				return false
+			}
+		default:
+			return false
+		}
+		start = false
+	}
+	return !start
 }

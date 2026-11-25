@@ -1,9 +1,11 @@
 package dialect
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mhdaslam790/kiln/q"
 	"github.com/mhdaslam790/kiln/schema"
@@ -328,3 +330,49 @@ func TestClassify(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestSQLiteTimesStoredInUTC(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.FixedZone("", 5*3600))
+	nt := sql.NullTime{Time: at, Valid: true}
+	st, err := SQLite().Raw("SELECT ?, ?, ?, ?", []any{at, &at, nt, "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, p, n := st.Args[0].(time.Time), st.Args[1].(*time.Time), st.Args[2].(sql.NullTime)
+	if a.Location() != time.UTC || !a.Equal(at) || p.Location() != time.UTC || !p.Equal(at) || n.Time.Location() != time.UTC {
+		t.Fatalf("args %v", st.Args)
+	}
+	if at.Location() == time.UTC {
+		t.Fatal("caller's value was changed")
+	}
+	// Other dialects pass times through untouched.
+	pg, _ := Postgres().Raw("SELECT ?", []any{at})
+	if pg.Args[0].(time.Time).Location() == time.UTC {
+		t.Fatal("postgres arg converted")
+	}
+}
+
+func TestSortAndSetNeedColumnNames(t *testing.T) {
+	for _, ok := range []string{"name", "users.name", "_x1", "ünï"} {
+		if !isColumn(ok) {
+			t.Errorf("isColumn(%q) = false", ok)
+		}
+	}
+	bad := []string{"", "(SELECT 1)", "name; DROP TABLE x", "name = (SELECT 1), age", "1x", "a..b", "a.", ".a", "a b", `a"b`, "a`b", "a[b]", "LOWER(name)", "*"}
+	for _, s := range bad {
+		if isColumn(s) {
+			t.Errorf("isColumn(%q) = true", s)
+		}
+	}
+	for _, d := range []Dialect{SQLite(), Postgres(), MySQL(), MSSQL()} {
+		if _, err := d.Select(q.Apply(q.From("users"), q.Sort("-(SELECT password FROM admins)"))); err == nil {
+			t.Errorf("%s: expression sort accepted", d.Kind())
+		}
+		if _, err := d.Update("users", []q.Mutation{q.Set("name = (SELECT 1), age", 1)}, nil); err == nil {
+			t.Errorf("%s: expression SET target accepted", d.Kind())
+		}
+		if _, err := d.Select(q.Apply(q.From("users"), q.Sort("-users.created_at", "id"))); err != nil {
+			t.Errorf("%s: %v", d.Kind(), err)
+		}
+	}
+}
