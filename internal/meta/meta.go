@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Field maps a struct field to a column.
@@ -499,19 +500,24 @@ func Snake(s string) string {
 
 // Camel converts snake_case to CamelCase with common acronyms: user_id -> UserID.
 func Camel(s string) string {
-	parts := strings.Split(s, "_")
-	for i, p := range parts {
-		if p == "" {
-			continue
-		}
+	parts := strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	var b strings.Builder
+	for _, p := range parts {
 		switch up := strings.ToUpper(p); up {
 		case "ID", "URL", "URI", "API", "HTTP", "JSON", "UUID", "SQL", "IP", "HTML":
-			parts[i] = up
+			b.WriteString(up)
 		default:
-			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+			r, n := utf8.DecodeRuneInString(p)
+			b.WriteRune(unicode.ToUpper(r))
+			b.WriteString(p[n:])
 		}
 	}
-	return strings.Join(parts, "")
+	out := b.String()
+	// A Go identifier can't start with a digit (or be empty).
+	if r, _ := utf8.DecodeRuneInString(out); out == "" || unicode.IsDigit(r) {
+		out = "X" + out
+	}
+	return out
 }
 
 // Plural is a small English pluralizer good enough for table names.

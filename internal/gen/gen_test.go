@@ -97,6 +97,10 @@ func TestGenerators(t *testing.T) {
 	if r := strings.Join(strings.Fields(read(t, p.path("models/report.go"))), " "); !strings.Contains(r, "TableNameCol string `db:\"table_name\"`") {
 		t.Errorf("table_name column clashes with TableName():\n%s", r)
 	}
+	must(p.Create("Order", []string{"3d_model:string", "select:int", "type:string"}, CreateOptions{}))
+	if o := strings.Join(strings.Fields(read(t, p.path("models/order.go"))), " "); !strings.Contains(o, "X3dModel string `db:\"3d_model\"`") || !strings.Contains(o, "Select int `db:\"select\"`") {
+		t.Errorf("odd column names:\n%s", o)
+	}
 	if err := p.Create("BlogPost", nil, CreateOptions{}); err == nil {
 		t.Error("duplicate create should fail")
 	}
@@ -122,17 +126,18 @@ func TestGenerators(t *testing.T) {
 	want := []string{
 		"20260102030405_create_blog_posts.go",
 		"20260102030406_create_report_x.go",
-		"20260102030407_add_views_meta_summary_to_blog_posts.go",
-		"20260102030408_rename_views_to_view_count_in_blog_posts.go",
-		"20260102030409_rename_summary_to_abstract_in_blog_posts.go",
-		"20260102030410_drop_published_at_from_blog_posts.go",
-		"20260102030411_add_index_uniq_blog_posts_title.go",
+		"20260102030407_create_orders.go",
+		"20260102030408_add_views_meta_summary_to_blog_posts.go",
+		"20260102030409_rename_views_to_view_count_in_blog_posts.go",
+		"20260102030410_rename_summary_to_abstract_in_blog_posts.go",
+		"20260102030411_drop_published_at_from_blog_posts.go",
+		"20260102030412_add_index_uniq_blog_posts_title.go",
 		"migrations.go",
 	}
 	if strings.Join(names, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("migrations:\n%s", strings.Join(names, "\n"))
 	}
-	drop := read(t, p.path("db/migrations", want[5]))
+	drop := read(t, p.path("db/migrations", want[6]))
 	if !strings.Contains(drop, `a.DateTime("published_at")`) {
 		t.Errorf("drop-column down should restore a nullable datetime:\n%s", drop)
 	}

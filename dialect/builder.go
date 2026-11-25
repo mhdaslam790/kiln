@@ -1,12 +1,14 @@
 package dialect
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/mhdaslam790/kiln/q"
 )
@@ -57,7 +59,7 @@ func (d *sqlDialect) Quote(ident string) string {
 	if ident == "*" || ident == "" {
 		return ident
 	}
-	if strings.ContainsAny(ident, "() '\"`[]+-/,:") || (ident[0] >= '0' && ident[0] <= '9') {
+	if strings.ContainsAny(ident, "() '\"`[]+-/,:") || isNumber(ident) {
 		return ident
 	}
 	if q, ok := d.quoted.Load(ident); ok {
@@ -121,6 +123,9 @@ func (b *buf) w(s ...string) {
 }
 
 func (b *buf) arg(v any) {
+	if b.d.kind == KindSQLite || b.d.kind == KindMSSQL {
+		v = utcArg(v)
+	}
 	b.args = append(b.args, v)
 	n := len(b.args)
 	switch b.d.kind {
@@ -425,6 +430,9 @@ func (b *buf) selectQuery(qq q.Query) error {
 			if i > 0 {
 				b.w(", ")
 			}
+			if !isColumn(s.Field) {
+				return fmt.Errorf("dialect: sort by %q: not a column name (use q.SQL for an ordering expression)", s.Field)
+			}
 			b.w(d.Quote(s.Field))
 			if s.Desc {
 				b.w(" DESC")
@@ -603,6 +611,9 @@ func (d *sqlDialect) Update(table string, set []q.Mutation, where q.Filter) (Stm
 		if i > 0 {
 			b.w(", ")
 		}
+		if !isColumn(m.Field) {
+			return Stmt{}, fmt.Errorf("dialect: update %s: %q is not a column name", table, m.Field)
+		}
 		f := d.Quote(m.Field)
 		b.w(f, " = ")
 		switch m.Kind {
@@ -681,4 +692,67 @@ func (d *sqlDialect) mssqlMergeInsert(ins Insert) (Stmt, error) {
 	}
 	b.w(") OUTPUT s.", pos, ", INSERTED.", d.Quote(ins.Returning), ";")
 	return b.stmt(), nil
+}
+
+// utcArg sends times in UTC (the same instant) where the column keeps no
+// zone. SQLite stores text: the driver can't read back a fixed-offset zone
+// (what time.Parse returns for "...+05:00", e.g. from JSON), and mixed
+// offsets sort wrongly. SQL Server's DATETIME2 drops the offset, so a
+// +05:00 time would read back 5 hours off. (PostgreSQL uses TIMESTAMPTZ;
+// the MySQL driver converts to its connection zone itself.)
+func utcArg(v any) any {
+	switch t := v.(type) {
+	case time.Time:
+		if t.Location() != time.UTC {
+			return t.UTC()
+		}
+	case *time.Time:
+		if t != nil && t.Location() != time.UTC {
+			u := t.UTC()
+			return &u
+		}
+	case sql.NullTime:
+		if t.Valid && t.Time.Location() != time.UTC {
+			return sql.NullTime{Time: t.Time.UTC(), Valid: true}
+		}
+	}
+	return v
+}
+
+// isNumber reports whether s is a numeric literal such as 1 or 2.5 (kept
+// unquoted, e.g. in a select list); "3d_model" is an identifier.
+func isNumber(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && s[i] != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// isColumn reports whether s is a plain, optionally table-qualified column
+// name. Sort fields and SET targets often come from request parameters, so
+// they must never carry SQL: Quote passes expressions through unchanged.
+func isColumn(s string) bool {
+	if s == "" {
+		return false
+	}
+	start := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '.':
+			if start {
+				return false
+			}
+			start = true
+			continue
+		case c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80:
+		case c >= '0' && c <= '9': // quoted, so "3d_model" is fine
+		default:
+			return false
+		}
+		start = false
+	}
+	return !start
 }

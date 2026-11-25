@@ -189,6 +189,11 @@ func (r *Repo[T]) InsertAll(ctx context.Context, recs []T, opts ...InsertOption)
 }
 
 // Update writes rec by primary key (all fields, or only the named ones).
+//
+// If no row has that key, Update writes nothing and returns nil, as
+// database/sql reports "rows affected" inconsistently (MySQL counts only
+// rows whose values changed). To detect it, give the model a version lock
+// (db:"version,lock"): a missing or changed row is then ErrStale.
 func (r *Repo[T]) Update(ctx context.Context, rec *T, fields ...string) error {
 	return r.db.Update(ctx, rec, fields...)
 }
