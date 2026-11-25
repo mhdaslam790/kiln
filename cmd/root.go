@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -25,7 +26,12 @@ Field syntax:  name:type[:modifier...]
 
 // Execute runs the CLI.
 func Execute() {
+	rootCmd.Version = gen.Version()
 	if err := rootCmd.Execute(); err != nil {
+		var exit gen.ExitError
+		if errors.As(err, &exit) { // the program already printed its error
+			os.Exit(exit.Code)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
