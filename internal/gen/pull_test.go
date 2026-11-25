@@ -3,6 +3,7 @@ package gen
 import (
 	"go/parser"
 	"go/token"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,9 +44,9 @@ func TestPullArraysAndEnums(t *testing.T) {
 			{Name: "id", Type: schema.ID, Primary: true},
 			{Name: "tags", Type: schema.Text, SQLType: "TEXT[]"},
 			{Name: "scores", Type: schema.Text, SQLType: "BIGINT[]", Required: true},
-			{Name: "moods", Type: schema.Text, SQLType: "kiln mood[]"},
-			{Name: "mood", Type: schema.Text, SQLType: "kiln mood", Required: true},
-			{Name: "old_mood", Type: schema.Text, SQLType: "kiln mood"},
+			{Name: "moods", Type: schema.Text, SQLType: `"kiln mood"[]`},
+			{Name: "mood", Type: schema.Text, SQLType: `"kiln mood"`, Required: true},
+			{Name: "old_mood", Type: schema.Text, SQLType: `"kiln mood"`},
 			{Name: "boxes", Type: schema.Text, SQLType: "BOX[]"},
 		},
 		PrimaryKey: []string{"id"},
@@ -58,13 +59,18 @@ func TestPullArraysAndEnums(t *testing.T) {
 		"Tags kilnpg.Array[string] `db:\"tags\" schema:\"sqltype:TEXT[]\"`",
 		"Scores kilnpg.Array[int64] `db:\"scores\" schema:\"sqltype:BIGINT[],notnull\"`",
 		"Moods kilnpg.Array[KilnMood]",
-		"Mood KilnMood `db:\"mood\" schema:\"type:text,sqltype:kiln mood\"`",
+		"Mood KilnMood `db:\"mood\" schema:\"type:text,sqltype:\\\"kiln mood\\\"\"`",
 		"OldMood *KilnMood",
 		"Boxes *string", // no Go element type: text, as before
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("missing %q in\n%s", want, src)
 		}
+	}
+	// The tag reads back as the quoted type name, which DDL needs.
+	tag := reflect.StructTag(`db:"mood" schema:"type:text,sqltype:\"kiln mood\""`)
+	if got := tag.Get("schema"); got != `type:text,sqltype:"kiln mood"` {
+		t.Errorf("tag reads back as %q", got)
 	}
 	e := enumSource("domain", "KilnMood", "kiln mood", []string{"happy", "it's ok", "It's OK", "!!"})
 	if _, err := parser.ParseFile(token.NewFileSet(), "enum.go", e, 0); err != nil {

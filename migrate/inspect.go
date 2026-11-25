@@ -53,6 +53,17 @@ var pgArrayElem = map[string]string{
 	"float8": "DOUBLE PRECISION", "bool": "BOOLEAN", "bpchar": "CHAR",
 }
 
+// pgTypeName quotes a type name that PostgreSQL would otherwise misread
+// (spaces, capitals, ...), as DDL needs it: order status -> "order status".
+func pgTypeName(name string) string {
+	if plainName.MatchString(name) {
+		return name
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+var plainName = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
+
 // pgEnums loads the schema's enum types and names enum and array columns
 // the way migrations write them (mood, mood[], BIGINT[]).
 func pgEnums(ctx context.Context, db *orm.DB, st *schema.State) error {
@@ -85,7 +96,7 @@ ORDER BY t.typname, e.enumsortorder`); err != nil {
 				continue
 			}
 			if name, ok := byFold[strings.ToLower(base)]; ok {
-				base = name
+				base = pgTypeName(name)
 			} else if arr {
 				if n, ok := pgArrayElem[strings.ToLower(base)]; ok {
 					base = n

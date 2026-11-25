@@ -120,7 +120,7 @@ func TestKilnPG(t *testing.T) {
 			t.Errorf("inspected enum = %q", got)
 		}
 		lt := live.Tables["pg_posts"]
-		for col, want := range map[string]string{"tags": "TEXT[]", "scores": "BIGINT[]", "mood": "kiln mood"} {
+		for col, want := range map[string]string{"tags": "TEXT[]", "scores": "BIGINT[]", "mood": `"kiln mood"`} {
 			if c := lt.Column(col); c == nil || c.SQLType != want {
 				t.Errorf("inspected %s = %+v, want SQLType %q", col, c, want)
 			}
@@ -130,6 +130,23 @@ func TestKilnPG(t *testing.T) {
 		for _, op := range res.Up {
 			t.Errorf("diff --db wants a change: %#v", op)
 		}
+		// The SQL diff --db writes for an enum whose name needs quotes runs:
+		// the model has a column the database doesn't.
+		loose := *lt
+		loose.Columns = []schema.Column{*lt.Column("id")}
+		res, err = migrate.Diff(&schema.State{Tables: map[string]*schema.TableState{"pg_posts": &loose}, Enums: live.Enums}, PgPostLoose{})
+		must(t, err)
+		if len(res.Up) != 1 {
+			t.Fatalf("diff --db = %#v", res.Up)
+		}
+		change := migrate.Migration{Version: 20990111000002, Name: "loosen", Up: func(s *schema.Schema) { s.Ops = append(s.Ops, res.Up...) },
+			Down: func(s *schema.Schema) { s.Ops = append(s.Ops, res.Down...) }}
+		m2 := migrate.New(db, append(migrations(), mig, change))
+		_, err = m2.Up(ctx)
+		must(t, err)
+		_, err = m2.Down(ctx, 1)
+		must(t, err)
+
 		if !strings.Contains(migrate.ERD(live, "pg_posts"), `"happy | sad | it's ok"`) {
 			t.Errorf("ERD has no enum values:\n%s", migrate.ERD(live, "pg_posts"))
 		}
@@ -143,3 +160,12 @@ func TestKilnPG(t *testing.T) {
 		}
 	})
 }
+
+// PgPostLoose is pg_posts with one more enum column, its type quoted in
+// the tag as kiln pull writes it.
+type PgPostLoose struct {
+	ID    int64
+	Mood2 *Mood `db:"mood2" schema:"sqltype:\"kiln mood\""`
+}
+
+func (PgPostLoose) TableName() string { return "pg_posts" }
