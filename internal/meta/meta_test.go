@@ -174,3 +174,15 @@ func TestLockField(t *testing.T) {
 		}
 	}
 }
+
+func TestCamelValidIdentifiers(t *testing.T) {
+	for in, want := range map[string]string{
+		"user_id": "UserID", "html_body": "HTMLBody", "3d_model": "X3dModel", "my-col": "MyCol",
+		"my col": "MyCol", "ünïcode_name": "ÜnïcodeName", "_x": "X", "x__y": "XY", "$amt": "Amt",
+		"1": "X1", "": "X", "a.b": "AB", "post_tags": "PostTags",
+	} {
+		if got := Camel(in); got != want {
+			t.Errorf("Camel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -59,7 +59,7 @@ func (d *sqlDialect) Quote(ident string) string {
 	if ident == "*" || ident == "" {
 		return ident
 	}
-	if strings.ContainsAny(ident, "() '\"`[]+-/,:") || (ident[0] >= '0' && ident[0] <= '9') {
+	if strings.ContainsAny(ident, "() '\"`[]+-/,:") || isNumber(ident) {
 		return ident
 	}
 	if q, ok := d.quoted.Load(ident); ok {
@@ -123,8 +123,8 @@ func (b *buf) w(s ...string) {
 }
 
 func (b *buf) arg(v any) {
-	if b.d.kind == KindSQLite {
-		v = sqliteArg(v)
+	if b.d.kind == KindSQLite || b.d.kind == KindMSSQL {
+		v = utcArg(v)
 	}
 	b.args = append(b.args, v)
 	n := len(b.args)
@@ -694,11 +694,13 @@ func (d *sqlDialect) mssqlMergeInsert(ins Insert) (Stmt, error) {
 	return b.stmt(), nil
 }
 
-// sqliteArg stores times in UTC. SQLite keeps times as text: the driver
-// cannot read back a time with a fixed-offset zone (what time.Parse returns
-// for "2026-03-04T05:06:07+05:00", e.g. from JSON), and text with mixed
-// offsets sorts and compares wrongly. The instant is unchanged.
-func sqliteArg(v any) any {
+// utcArg sends times in UTC (the same instant) where the column keeps no
+// zone. SQLite stores text: the driver can't read back a fixed-offset zone
+// (what time.Parse returns for "...+05:00", e.g. from JSON), and mixed
+// offsets sort wrongly. SQL Server's DATETIME2 drops the offset, so a
+// +05:00 time would read back 5 hours off. (PostgreSQL uses TIMESTAMPTZ;
+// the MySQL driver converts to its connection zone itself.)
+func utcArg(v any) any {
 	switch t := v.(type) {
 	case time.Time:
 		if t.Location() != time.UTC {
@@ -715,6 +717,17 @@ func sqliteArg(v any) any {
 		}
 	}
 	return v
+}
+
+// isNumber reports whether s is a numeric literal such as 1 or 2.5 (kept
+// unquoted, e.g. in a select list); "3d_model" is an identifier.
+func isNumber(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && s[i] != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // isColumn reports whether s is a plain, optionally table-qualified column
@@ -735,10 +748,7 @@ func isColumn(s string) bool {
 			start = true
 			continue
 		case c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80:
-		case c >= '0' && c <= '9':
-			if start {
-				return false
-			}
+		case c >= '0' && c <= '9': // quoted, so "3d_model" is fine
 		default:
 			return false
 		}
