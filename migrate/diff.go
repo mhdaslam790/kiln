@@ -211,7 +211,10 @@ func columnChange(d dialect.Dialect, cur, want schema.Column, dec declared) (sch
 	out.Primary = false
 	out.Unique = false // uniqueness is handled with indexes
 	changed := false
-	if baseType(cur.Type) != baseType(want.Type) && !samePhysical(d, cur, want) {
+	// With the same declared SQL type, the database type is that one and
+	// the abstract type (string or text for an enum) doesn't matter.
+	sqlSame := want.SQLType != "" && sameSQLType(cur.SQLType, want.SQLType)
+	if !sqlSame && baseType(cur.Type) != baseType(want.Type) && !samePhysical(d, cur, want) {
 		out.Type, changed = want.Type, true
 		if dec.limit || want.Type != schema.String {
 			out.Limit = want.Limit
@@ -278,9 +281,29 @@ func zeroDefault(t schema.ColumnType) (any, bool) {
 // sameSQLType compares two SQL types, ignoring case and identifier quotes
 // ("mood" and mood, TEXT[] and text[]).
 func sameSQLType(a, b string) bool {
-	strip := strings.NewReplacer(`"`, "", "`", "", "[", "", "]", "")
 	if strings.HasSuffix(a, "[]") != strings.HasSuffix(b, "[]") {
 		return false
 	}
-	return strings.EqualFold(strip.Replace(a), strip.Replace(b))
+	return canonSQLType(a) == canonSQLType(b)
+}
+
+// sqlTypeAlias maps PostgreSQL's alternative spellings to one name.
+var sqlTypeAlias = map[string]string{
+	"int": "integer", "int4": "integer", "int8": "bigint", "int2": "smallint",
+	"float8": "double precision", "float4": "real", "bool": "boolean",
+	"varchar": "character varying", "bpchar": "character", "char": "character",
+}
+
+func canonSQLType(s string) string {
+	s = strings.ToLower(strings.NewReplacer(`"`, "", "`", "", "[", "", "]", "").Replace(s))
+	s = strings.Join(strings.Fields(s), " ")
+	base, args, _ := strings.Cut(s, "(")
+	base = strings.TrimSpace(base)
+	if a, ok := sqlTypeAlias[base]; ok {
+		base = a
+	}
+	if args != "" {
+		return base + "(" + args
+	}
+	return base
 }

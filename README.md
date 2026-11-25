@@ -1294,6 +1294,7 @@ Down: func(s *schema.Schema) {
 },
 ```
 
+`kiln diff` and `kiln erd` read these enum steps, so they don't count as raw SQL.
 `kilnpg.AddEnumValue(s, "mood", "calm")` adds a value. Use the new value in a later
 migration, because PostgreSQL only allows it once the transaction that added it has committed.
 `Array` holds `string`, `bool`, integer and float elements (or named types of them). It can't
@@ -1684,6 +1685,11 @@ kiln diff --db             # compare with the live database instead of the migra
 kiln pull                  # the reverse: models from an existing database
 ```
 
+On PostgreSQL, `kiln pull` turns array columns into `kilnpg.Array[T]` fields and each enum
+type into a Go string type with one constant per value (`OrderStatusPaid OrderStatus =
+"paid"`), in `enum_<name>.go`. Arrays of types with no Go equivalent, such as `box[]`, stay
+plain strings.
+
 ### Schema diagram
 
 ```bash
@@ -1710,7 +1716,8 @@ erDiagram
     users |o--o{ posts : "editor_id"
 ```
 
-Each table lists its columns with `PK`/`FK`/`UK` and `"null"` for nullable ones. Each foreign
+Each table lists its columns with `PK`/`FK`/`UK`, `"null"` for nullable ones and the values of
+PostgreSQL enum columns (`"new | paid | shipped"`). Each foreign
 key is a relationship labelled with its column: one-to-many, one-to-one when the key is
 unique, and optional when it is nullable. A many-to-many join table shows as a table with two
 keys. No database is needed: like `kiln diff`, it replays your migrations. Steps written as raw

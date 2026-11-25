@@ -56,6 +56,8 @@ type State struct {
 	Tables map[string]*TableState
 	// Opaque counts operations that could not be modelled (raw SQL, Go code).
 	Opaque int
+	// Enums holds PostgreSQL enum types and their values, in order.
+	Enums map[string][]string `json:",omitempty"`
 }
 
 // NewState returns an empty State.
@@ -245,7 +247,11 @@ func (s *State) Apply(op Op) error {
 			}
 		}
 		t.Indexes = idx
-	case Exec, Do:
+	case Exec:
+		if !s.applyEnumSQL(o.SQL, o.Args) {
+			s.Opaque++
+		}
+	case Do:
 		s.Opaque++
 	case AllowUnsafe:
 		// lint marker only
