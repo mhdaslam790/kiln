@@ -139,7 +139,7 @@ Run this inside a Go module (a directory with a `go.mod`):
 
 ```bash
 kiln init --dialect postgres
-go get github.com/jackc/pgx/v5/stdlib
+go get github.com/mhdaslam790/kiln github.com/jackc/pgx/v5/stdlib
 ```
 
 This creates:
@@ -1630,6 +1630,9 @@ type Post struct {
 - Every generated `Down` restores the previous schema, including dropped columns.
 - The CLI generators write matching tags, so `kiln diff` right after `create`/`add-column`
   reports "schema is up to date". Running `diff` after `pull` also reports no changes.
+- `pull` reads columns, types, nullability, lengths, keys, indexes and foreign keys, but not
+  column defaults (their SQL differs per database). Add `schema:"default:..."` by hand where
+  you want the model to own one.
 
 **Always read a generated migration before applying it.** It is an ordinary Go file, so you
 can edit it. `kiln diff` also runs the [safety checks](#migration-safety-checks) on the
@@ -1854,7 +1857,7 @@ SQL-generation tests, and by the integration suite when `MSSQL_DSN` is set.
 | Foreign keys not enforced on SQLite | Add `_pragma=foreign_keys(1)` to the DSN |
 | `DATABASE_URL is not set` | Add `DATABASE_URL=...` to `.env` in the project root, export it, or pass `--dsn` |
 | `go.mod not found` | Run kiln inside your module, after `go mod init` |
-| `diff`/`pull`: `cannot find package` | `go get` the library and your driver, then `go mod tidy` |
+| `go.mod is missing packages kiln needs` | Run the `go get` command it prints (the library and your driver) |
 | `applied but missing from code` | A migration file was deleted after being applied. Restore it, or delete its row from `schema_migrations`. |
 | A migration failed half-way on MySQL | MySQL can't roll back DDL. Fix the schema by hand, then re-run. |
 | `diff` keeps suggesting a change | Declare the attribute in the `schema` tag (e.g. `limit:120`), or use `schema:"-"` |

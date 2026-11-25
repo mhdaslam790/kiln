@@ -58,8 +58,8 @@ func (p *Project) Init(cfg Config, force bool) error {
 	if err := p.ensureDotEnv(d.DSNExample); err != nil {
 		return err
 	}
-	p.Out("\nnext steps:\n  go get %s@latest %s\n  edit DATABASE_URL in .env\n  kiln create User name:string email:string:unique\n  kiln migrate up",
-		libPath, d.Import)
+	p.Out("\nnext steps:\n  go get %s@%s %s\n  edit DATABASE_URL in .env\n  kiln create User name:string email:string:unique\n  kiln migrate up",
+		libPath, Version(), d.Import)
 	if cfg.Repositories != "" {
 		p.Out("  kiln scaffold User   # optional: repository interface, kiln implementation and usecase")
 	}
@@ -292,8 +292,12 @@ func (p *Project) DropIndex(model string, columns []string, unique bool) error {
 // Migrate runs the project's migration runner with go run.
 func (p *Project) Migrate(args []string, dsn string) error {
 	runner := p.path(p.Config.Runner)
-	if _, err := os.Stat(filepath.Join(runner, "main.go")); err != nil {
+	src, err := os.ReadFile(filepath.Join(runner, "main.go"))
+	if err != nil {
 		return fmt.Errorf("%s/main.go not found; run kiln init first", p.Config.Runner)
+	}
+	if err := p.checkImports(src); err != nil {
+		return err
 	}
 	cmd := exec.Command("go", append([]string{"run", "./" + filepath.ToSlash(p.Config.Runner)}, args...)...)
 	cmd.Dir = p.Root
@@ -302,7 +306,7 @@ func (p *Project) Migrate(args []string, dsn string) error {
 	if dsn != "" {
 		cmd.Env = append(cmd.Env, "DATABASE_URL="+dsn)
 	}
-	return cmd.Run()
+	return exitErr(cmd.Run())
 }
 
 func (p *Project) tableOf(model string) (string, error) {

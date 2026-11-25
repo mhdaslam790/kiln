@@ -102,6 +102,9 @@ func (p *Project) listModels() ([]modelInfo, error) {
 // runProgram writes a temporary main package inside the module, runs it
 // with go run and decodes its JSON output into v.
 func (p *Project) runProgram(src string, env []string, v any) error {
+	if err := p.checkImports([]byte(src)); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp(p.Root, "kiln_tmp_")
 	if err != nil {
 		return err
