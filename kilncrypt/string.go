@@ -14,6 +14,7 @@ type String struct {
 	plain    string
 	hasPlain bool
 	sealed   string // stored form; "" if not sealed yet or NULL
+	bound    string // label of the column it was loaded from or sealed for
 }
 
 // NewString returns a String holding v, encrypted when written.
@@ -22,18 +23,30 @@ func NewString(v string) String { return String{plain: v, hasPlain: true} }
 // IsNull reports whether s is NULL.
 func (s String) IsNull() bool { return !s.hasPlain && s.sealed == "" }
 
-// Open returns the decrypted value ("" for NULL).
+// Open returns the decrypted value ("" for NULL). It checks that the
+// value belongs to the column it was loaded from. A value scanned with raw
+// SQL returns ErrUnbound; use OpenColumn for it.
 func (s String) Open(k *Keys) (string, error) {
 	if s.hasPlain || s.sealed == "" {
 		return s.plain, nil
 	}
-	return k.open(s.sealed)
+	return k.open(s.sealed, s.bound)
 }
 
-// keyID returns the id of the key s is sealed with.
-func (s String) keyID() (uint32, bool) {
-	id, _, ok := parse(s.sealed)
-	return id, ok
+// OpenColumn decrypts a value read from table.column, e.g. scanned with
+// raw SQL.
+func (s String) OpenColumn(k *Keys, table, column string) (string, error) {
+	if s.hasPlain || s.sealed == "" {
+		return s.plain, nil
+	}
+	return k.open(s.sealed, label(table, column))
+}
+
+// current reports whether s is stored in the latest format, with the
+// current key, for the column label.
+func (s String) current(k *Keys, label string) bool {
+	ver, id, _, ok := parse(s.sealed)
+	return ok && ver == 2 && id == k.current && s.bound == label
 }
 
 // Value implements driver.Valuer: the ciphertext, or NULL.

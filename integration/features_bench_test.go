@@ -73,7 +73,7 @@ func BenchmarkFeatures(b *testing.B) {
 			}
 
 			if s.name == "none" { // baseline for kilncrypt: same table, value encrypted once up front
-				sealed, _ := keys.Seal("x@x.io")
+				sealed, _ := keys.SealColumn("x@x.io", "patients", "email")
 				pats := orm.For[Patient](db)
 				b.Run("PatientInsert", func(b *testing.B) {
 					b.ReportAllocs()

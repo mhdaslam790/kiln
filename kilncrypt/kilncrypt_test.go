@@ -2,6 +2,9 @@ package kilncrypt
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,37 +23,66 @@ func mustKeys(t *testing.T, idx []byte, cur Key, old ...Key) *Keys {
 	return k
 }
 
+// sealV1 writes a value as kilncrypt v0.1 did (not bound to a column).
+func sealV1(t *testing.T, k *Keys, v string) string {
+	t.Helper()
+	aead := k.aeads[k.current]
+	buf := make([]byte, 4+aead.NonceSize(), 4+aead.NonceSize()+len(v)+aead.Overhead())
+	binary.BigEndian.PutUint32(buf, k.current)
+	if _, err := rand.Read(buf[4:]); err != nil {
+		t.Fatal(err)
+	}
+	out := aead.Seal(buf, buf[4:], []byte(v), aad(prefixV1, buf[:4], ""))
+	return prefixV1 + base64.RawURLEncoding.EncodeToString(out)
+}
+
+func scanned(stored string) String {
+	var s String
+	_ = s.Scan(stored)
+	return s
+}
+
 func TestSealOpen(t *testing.T) {
 	k := mustKeys(t, nil, key(1, 'a'))
-	s, err := k.Seal("ann@x.io")
+	s, err := k.SealColumn("ann@x.io", "users", "email")
 	if err != nil {
 		t.Fatal(err)
 	}
 	v, _ := s.Value()
 	stored := v.(string)
-	if !strings.HasPrefix(stored, "kc1:") || strings.Contains(stored, "ann") {
+	if !strings.HasPrefix(stored, "kc2:") || strings.Contains(stored, "ann") {
 		t.Fatalf("stored %q", stored)
 	}
-	again, _ := k.Seal("ann@x.io")
+	again, _ := k.SealColumn("ann@x.io", "users", "email")
 	if v2, _ := again.Value(); v2 == stored {
 		t.Fatal("same value sealed twice gave the same ciphertext")
 	}
 
-	var loaded String
-	if err := loaded.Scan(stored); err != nil {
-		t.Fatal(err)
+	loaded := scanned(stored)
+	if got, err := loaded.OpenColumn(k, "users", "email"); err != nil || got != "ann@x.io" {
+		t.Fatalf("OpenColumn = %q, %v", got, err)
 	}
+	loaded.bound = label("users", "email") // as AfterRead does
 	if got, err := loaded.Open(k); err != nil || got != "ann@x.io" {
 		t.Fatalf("Open = %q, %v", got, err)
+	}
+
+	// Bound to its column: another column or table does not decrypt.
+	for _, at := range [][2]string{{"users", "name"}, {"admins", "email"}, {"users\x00e", "mail"}, {"", ""}} {
+		if _, err := loaded.OpenColumn(k, at[0], at[1]); !errors.Is(err, ErrDecrypt) {
+			t.Errorf("opened as %q.%q: %v", at[0], at[1], err)
+		}
+	}
+	// Scanned outside kiln: Open can't know the column.
+	if _, err := scanned(stored).Open(k); !errors.Is(err, ErrUnbound) {
+		t.Errorf("unbound Open: %v", err)
 	}
 
 	// Tampering, a missing key and garbage are all ErrDecrypt.
 	raw := []byte(stored)
 	raw[len(raw)-3] ^= 1
-	for name, in := range map[string]string{"tampered": string(raw), "garbage": "kc1:!!", "plain": "ann@x.io"} {
-		var s String
-		_ = s.Scan(in)
-		if _, err := s.Open(k); !errors.Is(err, ErrDecrypt) {
+	for name, in := range map[string]string{"tampered": string(raw), "garbage": "kc2:!!", "plain": "ann@x.io"} {
+		if _, err := scanned(in).OpenColumn(k, "users", "email"); !errors.Is(err, ErrDecrypt) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -63,9 +95,38 @@ func TestSealOpen(t *testing.T) {
 	if got, err := loaded.Open(rotated); err != nil || got != "ann@x.io" {
 		t.Fatalf("Open with old key = %q, %v", got, err)
 	}
-	s2, _ := rotated.Seal("x")
-	if id, _ := s2.keyID(); id != 2 {
+	s2, _ := rotated.SealColumn("x", "t", "c")
+	if _, id, _, _ := parse(s2.sealed); id != 2 {
 		t.Fatalf("sealed with key %d", id)
+	}
+	// Deprecated Seal leaves sealing to the plugin.
+	if d, _ := k.Seal("x"); !d.hasPlain || d.sealed != "" {
+		t.Fatalf("Seal: %+v", d)
+	}
+}
+
+func TestV1Values(t *testing.T) {
+	k := mustKeys(t, nil, key(1, 'a'))
+	old := scanned(sealV1(t, k, "legacy"))
+	// v0.1 values open in any column (they aren't bound), raw or loaded.
+	if got, err := old.Open(k); err != nil || got != "legacy" {
+		t.Fatalf("Open v1 = %q, %v", got, err)
+	}
+	old.bound = label("users", "email")
+	if got, err := old.Open(k); err != nil || got != "legacy" {
+		t.Fatalf("Open loaded v1 = %q, %v", got, err)
+	}
+	if old.current(k, old.bound) {
+		t.Fatal("v1 value reported current (Rotate would skip it)")
+	}
+	// A kc2 value relabelled kc1 does not open (the prefix is authenticated).
+	v2, _ := k.SealColumn("new", "users", "email")
+	if _, err := scanned("kc1:" + v2.sealed[4:]).Open(k); !errors.Is(err, ErrDecrypt) {
+		t.Fatalf("downgraded kc2: %v", err)
+	}
+	k.RejectUnbound()
+	if _, err := old.Open(k); !errors.Is(err, ErrDecrypt) {
+		t.Fatalf("RejectUnbound: %v", err)
 	}
 }
 

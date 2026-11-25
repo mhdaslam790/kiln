@@ -8,7 +8,8 @@ import (
 )
 
 // Rotate re-encrypts every T record whose String fields are sealed with an
-// old key, page by page, and returns how many records it updated. The db
+// old key or stored in the v0.1 format (not bound to a column), page by
+// page, and returns how many records it updated. The db
 // must have kilncrypt.Plugin with the new key as current and the old ones
 // still in Keys; once Rotate has run for every model, the old keys can be
 // dropped.
@@ -42,7 +43,7 @@ func Rotate[T any](ctx context.Context, db *orm.DB, keys *Keys) (int, error) {
 			var stale []string
 			for _, f := range fields {
 				s := rv.Field(f).Interface().(String)
-				if id, ok := s.keyID(); ok && id != keys.current {
+				if s.sealed != "" && !s.current(keys, s.bound) {
 					stale = append(stale, t.Field(f).Name)
 				}
 			}
