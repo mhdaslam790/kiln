@@ -284,6 +284,10 @@ func (b *buf) filter(f q.Filter) error {
 		b.w(")")
 	case q.ExprFilter:
 		return b.raw(x.SQL, x.Args, true)
+	case q.JSONCond:
+		return b.jsonCond(x)
+	case q.JSONContainsCond:
+		return b.jsonContains(x)
 	default:
 		return fmt.Errorf("dialect: unsupported filter %T", f)
 	}
