@@ -59,12 +59,21 @@ func (s *Set) List() []Migration {
 	return out
 }
 
+// local returns t in the local time zone: PostgreSQL returns it so, the
+// other databases as UTC.
+func local(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.Local()
+}
+
 // Status describes one migration's state.
 type Status struct {
 	Version   int64
 	Name      string
 	Applied   bool
-	AppliedAt time.Time
+	AppliedAt time.Time // in the local time zone, whatever the database returns
 	// Missing is true for versions recorded in the database that are no
 	// longer present in the code.
 	Missing bool
@@ -159,11 +168,11 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	for _, mg := range m.list {
 		known[mg.Version] = true
 		r, ok := done[mg.Version]
-		out = append(out, Status{Version: mg.Version, Name: mg.Name, Applied: ok, AppliedAt: r.AppliedAt})
+		out = append(out, Status{Version: mg.Version, Name: mg.Name, Applied: ok, AppliedAt: local(r.AppliedAt)})
 	}
 	for v, r := range done {
 		if !known[v] {
-			out = append(out, Status{Version: v, Name: r.Name, Applied: true, AppliedAt: r.AppliedAt, Missing: true})
+			out = append(out, Status{Version: v, Name: r.Name, Applied: true, AppliedAt: local(r.AppliedAt), Missing: true})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
