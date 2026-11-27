@@ -1670,6 +1670,10 @@ Unsigned`, plus `SQLType("CITEXT")` for a database-specific type. Index options:
 - A database lock stops two processes from migrating at once.
 - `migrate status` marks migrations recorded in the database but missing from code.
   `down` refuses to roll those back.
+- Each applied migration's row records its source file and a checksum (SHA-256 of the SQL
+  its Up produces). If an applied migration is edited later, `migrate status` marks it
+  `CHANGED SINCE APPLIED` and `up` logs a warning. Edits inside `s.Do` functions aren't detected.
+  Older `schema_migrations` tables get the two columns on the next `up` or `down`.
 - From code: `migrate.New(db, migrations.Set.List()).Up(ctx)`, e.g. on app start-up.
   Options: `WithTable`, `WithLog`, `WithoutLock`.
 
@@ -2005,6 +2009,7 @@ SQL-generation tests, and by the integration suite when `MSSQL_DSN` is set.
 | `go.mod not found` | Run kiln inside your module, after `go mod init` |
 | `go.mod is missing packages kiln needs` | Run the `go get` command it prints (the library and your driver) |
 | `applied but missing from code` | A migration file was deleted after being applied. Restore it, or delete its row from `schema_migrations`. |
+| `edited after it was applied` / `CHANGED SINCE APPLIED` | An applied migration's Up changed. The database still has the old version: put the change in a new migration (`kiln diff`) and revert the edit. If it's the latest migration and you want the new version, use `kiln migrate redo`. |
 | A migration failed half-way on MySQL | MySQL can't roll back DDL. Fix the schema by hand, then re-run. |
 | `diff` keeps suggesting a change | Declare the attribute in the `schema` tag (e.g. `limit:120`), or use `schema:"-"` |
 

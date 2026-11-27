@@ -176,6 +176,9 @@ func run(ctx context.Context, args []string) error {
 				state = "MISSING FROM CODE"
 			case s.Applied:
 				state = "applied " + s.AppliedAt.Format("2006-01-02 15:04:05")
+				if s.Changed {
+					state += "  CHANGED SINCE APPLIED"
+				}
 			}
 			fmt.Printf("%%d  %%-40s %%s\n", s.Version, s.Name, state)
 		}

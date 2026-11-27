@@ -21,9 +21,13 @@ package migrate
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -42,14 +46,23 @@ type Migration struct {
 	Name    string
 	Up      Func
 	Down    Func
+	// File is the base name of the source file that registered the
+	// migration (set by Set.Add). It is recorded when the migration is
+	// applied.
+	File string
 }
 
 // Set collects migrations, typically from init() functions in generated files.
 type Set struct{ items []Migration }
 
 // Add registers a migration. down may be nil for irreversible migrations.
+// The file calling Add is recorded as the migration's File.
 func (s *Set) Add(version int64, name string, up, down Func) {
-	s.items = append(s.items, Migration{Version: version, Name: name, Up: up, Down: down})
+	mg := Migration{Version: version, Name: name, Up: up, Down: down}
+	if _, file, _, ok := runtime.Caller(1); ok {
+		mg.File = filepath.Base(file)
+	}
+	s.items = append(s.items, mg)
 }
 
 // List returns the migrations sorted by version.
@@ -77,6 +90,16 @@ type Status struct {
 	// Missing is true for versions recorded in the database that are no
 	// longer present in the code.
 	Missing bool
+	// File is the migration's source file: from the code, or from the
+	// database for a missing migration.
+	File string
+	// Checksum is the SHA-256 of the SQL the migration's Up produces
+	// (from the database for a missing migration).
+	Checksum string
+	// Changed is true when the migration was applied with a different
+	// checksum: its Up was edited after it ran. Changes inside Do
+	// functions are not detected.
+	Changed bool
 }
 
 // Option configures a Migrator.
@@ -98,6 +121,7 @@ type Migrator struct {
 	table  string
 	logf   func(string, ...any)
 	noLock bool
+	meta   bool // the table has the file and checksum columns
 }
 
 // New creates a Migrator. Duplicate versions cause a panic at Up/Down time.
@@ -131,19 +155,77 @@ func (m *Migrator) ensureTable(ctx context.Context) error {
 		t.BigInt("version", schema.Primary(), schema.Required())
 		t.String("name", schema.Required())
 		t.DateTime("applied_at", schema.Required())
+		t.String("file")
+		t.String("checksum", schema.Limit(64))
 	})
 	return m.exec(ctx, &s)
+}
+
+// hasMeta reports whether the bookkeeping table has the file and checksum
+// columns (tables created by older versions of kiln don't).
+func (m *Migrator) hasMeta(ctx context.Context) bool {
+	if m.meta {
+		return true
+	}
+	var rows []struct {
+		File string `db:"file"`
+	}
+	m.meta = m.db.Query(ctx, &rows, "SELECT file FROM "+m.db.Dialect().Quote(m.table)+" WHERE checksum = 'x' AND 1 = 0") == nil
+	return m.meta
+}
+
+// upgradeTable adds the file and checksum columns to an older bookkeeping
+// table and fills them in for migrations applied before the upgrade, from
+// the current code. Callers hold the migration lock.
+func (m *Migrator) upgradeTable(ctx context.Context) error {
+	if err := m.ensureTable(ctx); err != nil {
+		return err
+	}
+	if !m.hasMeta(ctx) {
+		var s schema.Schema
+		s.AddColumn(m.table, "file", schema.String)
+		s.AddColumn(m.table, "checksum", schema.String, schema.Limit(64))
+		if err := m.exec(ctx, &s); err != nil {
+			return fmt.Errorf("migrate: add file and checksum to %s: %w", m.table, err)
+		}
+		m.meta = true
+	}
+	done, err := m.applied(ctx)
+	if err != nil {
+		return err
+	}
+	tbl := m.db.Dialect().Quote(m.table)
+	for _, mg := range m.list {
+		r, ok := done[mg.Version]
+		if !ok || r.Checksum != "" {
+			continue
+		}
+		sum, err := m.Checksum(mg)
+		if err != nil {
+			return err
+		}
+		if _, err := m.db.Exec(ctx, "UPDATE "+tbl+" SET file = ?, checksum = ? WHERE version = ?", mg.File, sum, mg.Version); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type appliedRow struct {
 	Version   int64     `db:"version"`
 	Name      string    `db:"name"`
 	AppliedAt time.Time `db:"applied_at"`
+	File      string    `db:"file"`
+	Checksum  string    `db:"checksum"`
 }
 
 func (m *Migrator) applied(ctx context.Context) (map[int64]appliedRow, error) {
 	var rows []appliedRow
-	err := m.db.Query(ctx, &rows, "SELECT version, name, applied_at FROM "+m.db.Dialect().Quote(m.table))
+	cols := "version, name, applied_at"
+	if m.hasMeta(ctx) {
+		cols += ", COALESCE(file, '') AS file, COALESCE(checksum, '') AS checksum"
+	}
+	err := m.db.Query(ctx, &rows, "SELECT "+cols+" FROM "+m.db.Dialect().Quote(m.table))
 	if err != nil {
 		return nil, err
 	}
@@ -168,11 +250,16 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	for _, mg := range m.list {
 		known[mg.Version] = true
 		r, ok := done[mg.Version]
-		out = append(out, Status{Version: mg.Version, Name: mg.Name, Applied: ok, AppliedAt: local(r.AppliedAt)})
+		sum, _ := m.Checksum(mg) // a broken Up is reported by Up itself
+		out = append(out, Status{
+			Version: mg.Version, Name: mg.Name, Applied: ok, AppliedAt: local(r.AppliedAt),
+			File: mg.File, Checksum: sum, Changed: ok && r.Checksum != "" && sum != "" && r.Checksum != sum,
+		})
 	}
 	for v, r := range done {
 		if !known[v] {
-			out = append(out, Status{Version: v, Name: r.Name, Applied: true, AppliedAt: local(r.AppliedAt), Missing: true})
+			out = append(out, Status{Version: v, Name: r.Name, Applied: true, AppliedAt: local(r.AppliedAt), Missing: true,
+				File: r.File, Checksum: r.Checksum})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
@@ -206,6 +293,10 @@ func (m *Migrator) UpTo(ctx context.Context, target int64) (applied []Migration,
 		return nil, err
 	}
 	err = m.locked(ctx, func() error {
+		if err := m.upgradeTable(ctx); err != nil {
+			return err
+		}
+		m.warnChanged(ctx)
 		pending, err := m.Pending(ctx)
 		if err != nil {
 			return err
@@ -233,7 +324,7 @@ func (m *Migrator) Down(ctx context.Context, steps int) (rolled []Migration, err
 		steps = 1
 	}
 	err = m.locked(ctx, func() error {
-		if err := m.ensureTable(ctx); err != nil {
+		if err := m.upgradeTable(ctx); err != nil {
 			return err
 		}
 		done, err := m.applied(ctx)
@@ -280,9 +371,38 @@ func (m *Migrator) Redo(ctx context.Context) error {
 	return err
 }
 
+// warnChanged logs every applied migration whose Up changed since it ran.
+func (m *Migrator) warnChanged(ctx context.Context) {
+	st, err := m.Status(ctx)
+	if err != nil {
+		return
+	}
+	for _, s := range st {
+		if s.Changed {
+			m.logf("warning: %d_%s was edited after it was applied (checksum differs); the database still has the old version", s.Version, s.Name)
+		}
+	}
+}
+
+// Checksum returns the SHA-256 (hex) of the SQL, with arguments, that the
+// migration's Up produces for this Migrator's dialect. Do steps count only
+// as a placeholder, so edits inside them don't change the checksum.
+func (m *Migrator) Checksum(mg Migration) (string, error) {
+	stmts, err := m.compile(mg, true, true)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256([]byte(strings.Join(stmts, "\n")))
+	return hex.EncodeToString(h[:]), nil
+}
+
 // SQL compiles a migration direction into SQL without running it (dry run).
 // Do steps are rendered as comments.
 func (m *Migrator) SQL(mg Migration, up bool) ([]string, error) {
+	return m.compile(mg, up, false)
+}
+
+func (m *Migrator) compile(mg Migration, up, withArgs bool) ([]string, error) {
 	fn := mg.Up
 	if !up {
 		fn = mg.Down
@@ -317,6 +437,9 @@ func (m *Migrator) SQL(mg Migration, up bool) ([]string, error) {
 		}
 		for _, st := range stmts {
 			out = append(out, st.SQL)
+			if withArgs && len(st.Args) > 0 {
+				out = append(out, fmt.Sprintf("-- args: %#v", st.Args))
+			}
 		}
 	}
 	return out, nil
@@ -336,8 +459,12 @@ func (m *Migrator) run(ctx context.Context, mg Migration, up bool) error {
 		}
 		tbl := m.db.Dialect().Quote(m.table)
 		if up {
-			_, err := m.db.Exec(ctx, "INSERT INTO "+tbl+" (version, name, applied_at) VALUES (?, ?, ?)",
-				mg.Version, mg.Name, time.Now().UTC())
+			sum, err := m.Checksum(mg)
+			if err != nil {
+				return err
+			}
+			_, err = m.db.Exec(ctx, "INSERT INTO "+tbl+" (version, name, applied_at, file, checksum) VALUES (?, ?, ?, ?, ?)",
+				mg.Version, mg.Name, time.Now().UTC(), mg.File, sum)
 			return err
 		}
 		_, err := m.db.Exec(ctx, "DELETE FROM "+tbl+" WHERE version = ?", mg.Version)
