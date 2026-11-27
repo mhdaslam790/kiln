@@ -44,7 +44,7 @@ func TestMigrationFileAndChecksum(t *testing.T) {
 		})
 
 		var rows []migRow
-		must(t, db.Query(ctx, &rows, "SELECT version, file, checksum FROM mig_checksum"))
+		must(t, db.Query(ctx, &rows, metaSQL(db, "mig_checksum")))
 		if len(rows) != 1 || rows[0].File != "migrate_checksum_test.go" || len(rows[0].Checksum) != 64 {
 			t.Fatalf("recorded %+v", rows)
 		}
@@ -104,7 +104,7 @@ func TestMigrationTableUpgrade(t *testing.T) {
 		_, err = m.Up(ctx)
 		must(t, err)
 		var rows []migRow
-		must(t, db.Query(ctx, &rows, "SELECT version, file, checksum FROM mig_old"))
+		must(t, db.Query(ctx, &rows, metaSQL(db, "mig_old")))
 		if len(rows) != 1 || rows[0].File != "migrate_checksum_test.go" || rows[0].Checksum != st[0].Checksum {
 			t.Fatalf("after upgrade %+v", rows)
 		}
@@ -119,4 +119,10 @@ func applyScratch(ctx context.Context, db *orm.DB, mg migrate.Migration) error {
 	}
 	_, err := db.Exec(ctx, "DROP TABLE mig_scratch")
 	return err
+}
+
+// metaSQL selects the bookkeeping columns, quoted (FILE is reserved in SQL Server).
+func metaSQL(db *orm.DB, table string) string {
+	d := db.Dialect()
+	return "SELECT version, " + d.Quote("file") + ", " + d.Quote("checksum") + " FROM " + d.Quote(table)
 }

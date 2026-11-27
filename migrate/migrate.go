@@ -170,7 +170,8 @@ func (m *Migrator) hasMeta(ctx context.Context) bool {
 	var rows []struct {
 		File string `db:"file"`
 	}
-	m.meta = m.db.Query(ctx, &rows, "SELECT file FROM "+m.db.Dialect().Quote(m.table)+" WHERE checksum = 'x' AND 1 = 0") == nil
+	d := m.db.Dialect()
+	m.meta = m.db.Query(ctx, &rows, "SELECT "+d.Quote("file")+" FROM "+d.Quote(m.table)+" WHERE "+d.Quote("checksum")+" = 'x' AND 1 = 0") == nil
 	return m.meta
 }
 
@@ -194,7 +195,8 @@ func (m *Migrator) upgradeTable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	tbl := m.db.Dialect().Quote(m.table)
+	d := m.db.Dialect()
+	update := "UPDATE " + d.Quote(m.table) + " SET " + d.Quote("file") + " = ?, " + d.Quote("checksum") + " = ? WHERE version = ?"
 	for _, mg := range m.list {
 		r, ok := done[mg.Version]
 		if !ok || r.Checksum != "" {
@@ -204,7 +206,7 @@ func (m *Migrator) upgradeTable(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, err := m.db.Exec(ctx, "UPDATE "+tbl+" SET file = ?, checksum = ? WHERE version = ?", mg.File, sum, mg.Version); err != nil {
+		if _, err := m.db.Exec(ctx, update, mg.File, sum, mg.Version); err != nil {
 			return err
 		}
 	}
@@ -223,7 +225,10 @@ func (m *Migrator) applied(ctx context.Context) (map[int64]appliedRow, error) {
 	var rows []appliedRow
 	cols := "version, name, applied_at"
 	if m.hasMeta(ctx) {
-		cols += ", COALESCE(file, '') AS file, COALESCE(checksum, '') AS checksum"
+		// FILE is reserved in SQL Server: always quote the new columns.
+		d := m.db.Dialect()
+		f, c := d.Quote("file"), d.Quote("checksum")
+		cols += ", COALESCE(" + f + ", '') AS " + f + ", COALESCE(" + c + ", '') AS " + c
 	}
 	err := m.db.Query(ctx, &rows, "SELECT "+cols+" FROM "+m.db.Dialect().Quote(m.table))
 	if err != nil {
@@ -457,13 +462,14 @@ func (m *Migrator) run(ctx context.Context, mg Migration, up bool) error {
 		if err := m.exec(ctx, &s); err != nil {
 			return err
 		}
-		tbl := m.db.Dialect().Quote(m.table)
+		d := m.db.Dialect()
+		tbl := d.Quote(m.table)
 		if up {
 			sum, err := m.Checksum(mg)
 			if err != nil {
 				return err
 			}
-			_, err = m.db.Exec(ctx, "INSERT INTO "+tbl+" (version, name, applied_at, file, checksum) VALUES (?, ?, ?, ?, ?)",
+			_, err = m.db.Exec(ctx, "INSERT INTO "+tbl+" (version, name, applied_at, "+d.Quote("file")+", "+d.Quote("checksum")+") VALUES (?, ?, ?, ?, ?)",
 				mg.Version, mg.Name, time.Now().UTC(), mg.File, sum)
 			return err
 		}
