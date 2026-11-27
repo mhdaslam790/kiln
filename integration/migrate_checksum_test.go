@@ -2,10 +2,15 @@ package integration
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mhdaslam790/kiln/dialect"
 	"github.com/mhdaslam790/kiln/migrate"
 	"github.com/mhdaslam790/kiln/orm"
 	"github.com/mhdaslam790/kiln/schema"
@@ -125,4 +130,90 @@ func applyScratch(ctx context.Context, db *orm.DB, mg migrate.Migration) error {
 func metaSQL(db *orm.DB, table string) string {
 	d := db.Dialect()
 	return "SELECT version, " + d.Quote("file") + ", " + d.Quote("checksum") + " FROM " + d.Quote(table)
+}
+
+// manyMigrations returns n small migrations, each creating a table with an
+// index, like a long-lived project's history.
+func manyMigrations(n int) []migrate.Migration {
+	var set migrate.Set
+	for i := 0; i < n; i++ {
+		tbl := fmt.Sprintf("t%04d", i)
+		set.Add(int64(20990301000000+i), "create_"+tbl, func(s *schema.Schema) {
+			s.CreateTable(tbl, func(t *schema.Table) {
+				t.ID("id")
+				t.String("name", schema.Required())
+				t.Timestamps()
+			})
+			s.CreateIndex(tbl, tbl+"_name_idx", []string{"name"})
+		}, func(s *schema.Schema) { s.DropTable(tbl) })
+	}
+	return set.List()
+}
+
+func openSQLiteFile(tb testing.TB, opts ...orm.Option) *orm.DB {
+	tb.Helper()
+	sqldb, err := sql.Open("sqlite", "file:"+filepath.Join(tb.TempDir(), "m.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	sqldb.SetMaxOpenConns(1)
+	tb.Cleanup(func() { sqldb.Close() })
+	return orm.Open(sqldb, dialect.SQLite(), opts...)
+}
+
+// TestUpReadsTableOnce: an up with nothing pending reads the bookkeeping
+// table once.
+func TestUpReadsTableOnce(t *testing.T) {
+	var reads atomic.Int32
+	db := openSQLiteFile(t, orm.WithHook(func(_ context.Context, e orm.Event) {
+		if strings.HasPrefix(e.SQL, "SELECT version, name, applied_at") {
+			reads.Add(1)
+		}
+	}))
+	ctx := context.Background()
+	list := manyMigrations(20)
+	_, err := migrate.New(db, list).Up(ctx)
+	must(t, err)
+	reads.Store(0)
+	applied, err := migrate.New(db, list).Up(ctx)
+	must(t, err)
+	if len(applied) != 0 || reads.Load() != 1 {
+		t.Fatalf("applied %d, read the table %d times", len(applied), reads.Load())
+	}
+}
+
+// BenchmarkUpNothingPending: a start-up "up" with a long history and
+// nothing to apply (a fresh Migrator each time, like a new process).
+func BenchmarkUpNothingPending(b *testing.B) {
+	for _, n := range []int{100, 500} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			db := openSQLiteFile(b)
+			ctx := context.Background()
+			list := manyMigrations(n)
+			if _, err := migrate.New(db, list).Up(ctx); err != nil {
+				b.Fatal(err)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := migrate.New(db, list).Up(ctx); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkChecksums: computing every checksum of a long history.
+func BenchmarkChecksums(b *testing.B) {
+	db := openSQLiteFile(b)
+	list := manyMigrations(500)
+	m := migrate.New(db, list)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, mg := range list {
+			if _, err := m.Checksum(mg); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
 }

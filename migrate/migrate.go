@@ -30,6 +30,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mhdaslam790/kiln/dialect"
@@ -122,6 +123,9 @@ type Migrator struct {
 	logf   func(string, ...any)
 	noLock bool
 	meta   bool // the table has the file and checksum columns
+
+	sumMu sync.Mutex
+	sums  map[int64]string // checksums of m.list, computed once
 }
 
 // New creates a Migrator. Duplicate versions cause a panic at Up/Down time.
@@ -175,25 +179,26 @@ func (m *Migrator) hasMeta(ctx context.Context) bool {
 	return m.meta
 }
 
-// upgradeTable adds the file and checksum columns to an older bookkeeping
-// table and fills them in for migrations applied before the upgrade, from
-// the current code. Callers hold the migration lock.
-func (m *Migrator) upgradeTable(ctx context.Context) error {
+// upgradeTable creates the bookkeeping table, or adds the file and checksum
+// columns to an older one and fills them in for migrations applied before
+// the upgrade, from the current code. It returns the applied migrations, so
+// callers read the table once. Callers hold the migration lock.
+func (m *Migrator) upgradeTable(ctx context.Context) (map[int64]appliedRow, error) {
 	if err := m.ensureTable(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	if !m.hasMeta(ctx) {
 		var s schema.Schema
 		s.AddColumn(m.table, "file", schema.String)
 		s.AddColumn(m.table, "checksum", schema.String, schema.Limit(64))
 		if err := m.exec(ctx, &s); err != nil {
-			return fmt.Errorf("migrate: add file and checksum to %s: %w", m.table, err)
+			return nil, fmt.Errorf("migrate: add file and checksum to %s: %w", m.table, err)
 		}
 		m.meta = true
 	}
 	done, err := m.applied(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	d := m.db.Dialect()
 	update := "UPDATE " + d.Quote(m.table) + " SET " + d.Quote("file") + " = ?, " + d.Quote("checksum") + " = ? WHERE version = ?"
@@ -202,15 +207,17 @@ func (m *Migrator) upgradeTable(ctx context.Context) error {
 		if !ok || r.Checksum != "" {
 			continue
 		}
-		sum, err := m.Checksum(mg)
+		sum, err := m.checksum(mg)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := m.db.Exec(ctx, update, mg.File, sum, mg.Version); err != nil {
-			return err
+			return nil, err
 		}
+		r.File, r.Checksum = mg.File, sum
+		done[mg.Version] = r
 	}
-	return nil
+	return done, nil
 }
 
 type appliedRow struct {
@@ -250,12 +257,16 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.status(done), nil
+}
+
+func (m *Migrator) status(done map[int64]appliedRow) []Status {
 	var out []Status
 	known := map[int64]bool{}
 	for _, mg := range m.list {
 		known[mg.Version] = true
 		r, ok := done[mg.Version]
-		sum, _ := m.Checksum(mg) // a broken Up is reported by Up itself
+		sum, _ := m.checksum(mg) // a broken Up is reported by Up itself
 		out = append(out, Status{
 			Version: mg.Version, Name: mg.Name, Applied: ok, AppliedAt: local(r.AppliedAt),
 			File: mg.File, Checksum: sum, Changed: ok && r.Checksum != "" && sum != "" && r.Checksum != sum,
@@ -268,7 +279,7 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
-	return out, nil
+	return out
 }
 
 // Pending returns migrations not yet applied.
@@ -280,13 +291,17 @@ func (m *Migrator) Pending(ctx context.Context) ([]Migration, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.pending(done), nil
+}
+
+func (m *Migrator) pending(done map[int64]appliedRow) []Migration {
 	var out []Migration
 	for _, mg := range m.list {
 		if _, ok := done[mg.Version]; !ok {
 			out = append(out, mg)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Up applies all pending migrations in version order.
@@ -298,15 +313,12 @@ func (m *Migrator) UpTo(ctx context.Context, target int64) (applied []Migration,
 		return nil, err
 	}
 	err = m.locked(ctx, func() error {
-		if err := m.upgradeTable(ctx); err != nil {
-			return err
-		}
-		m.warnChanged(ctx)
-		pending, err := m.Pending(ctx)
+		done, err := m.upgradeTable(ctx)
 		if err != nil {
 			return err
 		}
-		for _, mg := range pending {
+		m.warnChanged(done)
+		for _, mg := range m.pending(done) {
 			if target > 0 && mg.Version > target {
 				break
 			}
@@ -329,10 +341,7 @@ func (m *Migrator) Down(ctx context.Context, steps int) (rolled []Migration, err
 		steps = 1
 	}
 	err = m.locked(ctx, func() error {
-		if err := m.upgradeTable(ctx); err != nil {
-			return err
-		}
-		done, err := m.applied(ctx)
+		done, err := m.upgradeTable(ctx)
 		if err != nil {
 			return err
 		}
@@ -377,12 +386,8 @@ func (m *Migrator) Redo(ctx context.Context) error {
 }
 
 // warnChanged logs every applied migration whose Up changed since it ran.
-func (m *Migrator) warnChanged(ctx context.Context) {
-	st, err := m.Status(ctx)
-	if err != nil {
-		return
-	}
-	for _, s := range st {
+func (m *Migrator) warnChanged(done map[int64]appliedRow) {
+	for _, s := range m.status(done) {
 		if s.Changed {
 			m.logf("warning: %d_%s was edited after it was applied (checksum differs); the database still has the old version", s.Version, s.Name)
 		}
@@ -399,6 +404,28 @@ func (m *Migrator) Checksum(mg Migration) (string, error) {
 	}
 	h := sha256.Sum256([]byte(strings.Join(stmts, "\n")))
 	return hex.EncodeToString(h[:]), nil
+}
+
+// checksum is Checksum, cached for the Migrator's own migrations (their
+// versions are unique once validated).
+func (m *Migrator) checksum(mg Migration) (string, error) {
+	m.sumMu.Lock()
+	sum, ok := m.sums[mg.Version]
+	m.sumMu.Unlock()
+	if ok {
+		return sum, nil
+	}
+	sum, err := m.Checksum(mg)
+	if err != nil {
+		return "", err
+	}
+	m.sumMu.Lock()
+	if m.sums == nil {
+		m.sums = map[int64]string{}
+	}
+	m.sums[mg.Version] = sum
+	m.sumMu.Unlock()
+	return sum, nil
 }
 
 // SQL compiles a migration direction into SQL without running it (dry run).
@@ -465,7 +492,7 @@ func (m *Migrator) run(ctx context.Context, mg Migration, up bool) error {
 		d := m.db.Dialect()
 		tbl := d.Quote(m.table)
 		if up {
-			sum, err := m.Checksum(mg)
+			sum, err := m.checksum(mg)
 			if err != nil {
 				return err
 			}
